@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: hsjc-racing-dashboard
+    env: python
+    region: singapore
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    healthCheckPath: /health
