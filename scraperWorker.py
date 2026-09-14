@@ -156,6 +156,8 @@ def saveOddsBatch(oddsPayload):
 
     return savedCount
 
+wakeUpEvent = threading.Event()
+
 def runScraperCycle():
     """执行一次完整的抓取与计算循环"""
     nowStr = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -173,14 +175,17 @@ def runScraperCycle():
 
         totalSaved = savedWin + savedQin
         scraperConfig["totalRecordsSaved"] += totalSaved
-        scraperConfig["lastStatus"] = f"OK (Saved {totalSaved} odds at {nowStr})"
+        if totalSaved > 0:
+            scraperConfig["lastStatus"] = f"🟢 實時採集中: 成功入庫 {totalSaved} 條賠率 ({nowStr})"
+        else:
+            scraperConfig["lastStatus"] = f"🟡 待命中: 馬會彩池未開盤/非賽馬時段，等待開盤 ({nowStr})"
     except Exception as err:
-        scraperConfig["lastStatus"] = f"Error: {str(err)}"
+        scraperConfig["lastStatus"] = f"🔴 異常: {str(err)}"
 
 def autoScraperLoop():
     """主抓取守护循环"""
     print("[Scraper Daemon] Auto-scraper background thread started.")
-    time.sleep(5) # 启动缓冲 5 秒
+    time.sleep(3) # 启动缓冲 3 秒
 
     while True:
         try:
@@ -191,7 +196,9 @@ def autoScraperLoop():
 
         nextInterval = calculateDynamicInterval()
         scraperConfig["currentInterval"] = nextInterval
-        time.sleep(nextInterval)
+        # 使用 Event.wait 支持即时唤醒
+        wakeUpEvent.wait(timeout=nextInterval)
+        wakeUpEvent.clear()
 
 def keepAliveLoop():
     """Render 容器 7×24 小时防休眠保活守护循环"""
@@ -235,4 +242,5 @@ def updateScraperConfig(mode=None, interval=None, enabled=None):
             scraperConfig["currentInterval"] = int(interval)
     if enabled is not None:
         scraperConfig["enabled"] = bool(enabled)
+    wakeUpEvent.set() # 立即唤醒应用新配置
     return scraperConfig
