@@ -5,6 +5,7 @@ import sqlite3
 import os
 import urllib.parse
 from datetime import datetime
+from scraperWorker import startBackgroundWorkers, getScraperStatus, updateScraperConfig, runScraperCycle
 
 baseDir = os.path.dirname(os.path.abspath(__file__))
 dbPath = os.path.join(baseDir, "hsjc.db")
@@ -756,11 +757,25 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
         elif path == "/api/racecards":
             data = queryRaceCards()
             self.sendJsonResponse(data)
+        elif path == "/api/scraper/status":
+            self.sendJsonResponse(getScraperStatus())
+        elif path == "/api/scraper/config":
+            mode = queryParams.get("mode", [None])[0]
+            interval = queryParams.get("interval", [None])[0]
+            enabled = queryParams.get("enabled", [None])[0]
+            if enabled is not None:
+                enabled = enabled.lower() in ["1", "true", "yes"]
+            updated = updateScraperConfig(mode, interval, enabled)
+            self.sendJsonResponse(updated)
+        elif path == "/api/scraper/trigger":
+            runScraperCycle()
+            self.sendJsonResponse(getScraperStatus())
         else:
             self.send_response(404)
             self.end_headers()
 
 def runServer():
+    startBackgroundWorkers()
     http.server.ThreadingHTTPServer.allow_reuse_address = True
     with http.server.ThreadingHTTPServer(("", portNumber), CustomHandler) as httpd:
         print(f"=== hsjc 2.0 Cloud Web Service Active on Port {portNumber} ===")
