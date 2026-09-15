@@ -51,8 +51,17 @@ def queryCompareData(pool="WIN", raceNo=1, time1=None, time2=None):
         time1 = (time1 or "").strip()
         time2 = (time2 or "").strip()
         if not time1 or not time2 or time1 == "undefined" or time2 == "undefined":
-            time1 = "2026-09-06 11:30:00"
-            time2 = "2026-09-06 18:00:00"
+            cursor.execute(f"SELECT DISTINCT CollectionDateTime FROM {tableName} ORDER BY CollectionDateTime DESC LIMIT 2;")
+            recentRows = cursor.fetchall()
+            if len(recentRows) >= 2:
+                time2 = recentRows[0][0]
+                time1 = recentRows[1][0]
+            elif len(recentRows) == 1:
+                time2 = recentRows[0][0]
+                time1 = recentRows[0][0]
+            else:
+                time1 = "2026-09-06 11:30:00"
+                time2 = "2026-09-06 18:00:00"
         
         # Query Time 1
         sql1 = f"SELECT Number, {oddsCol}, Scratched, Hot FROM {tableName} WHERE CollectionDateTime = ? AND RaceNo = ?;"
@@ -188,8 +197,8 @@ htmlTemplate = """<!DOCTYPE html>
         <div class="flex items-center space-x-2 mt-2 sm:mt-0">
             <button onclick="switchTab('compareTab')" id="btnCompare" class="tab-btn px-4 py-2 rounded-lg text-sm font-bold bg-blue-600 text-white shadow-md shadow-blue-900/40">雙時刻落飛比對 (ResultForm)</button>
             <button onclick="switchTab('matrixTab')" id="btnMatrix" class="tab-btn px-4 py-2 rounded-lg text-sm font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700">2D 組合矩陣 (CompareForm)</button>
-            <button onclick="switchTab('resultsTab')" id="btnResults" class="tab-btn px-4 py-2 rounded-lg text-sm font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700">開鑼日歷史復盤</button>
-            <button onclick="switchTab('racecardTab')" id="btnRacecard" class="tab-btn px-4 py-2 rounded-lg text-sm font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700">明晚夜賽排位表</button>
+            <button onclick="switchTab('resultsTab')" id="btnResults" class="tab-btn px-4 py-2 rounded-lg text-sm font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700">賽事結果復盤</button>
+            <button onclick="switchTab('racecardTab')" id="btnRacecard" class="tab-btn px-4 py-2 rounded-lg text-sm font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700">最新排位表 (RaceCard)</button>
         </div>
     </header>
 
@@ -339,20 +348,10 @@ htmlTemplate = """<!DOCTYPE html>
                 <div class="flex justify-between items-center mb-4 pb-3 border-b border-slate-800">
                     <h2 class="text-lg font-bold text-white flex items-center">
                         <span class="w-2.5 h-2.5 bg-emerald-500 rounded-full mr-2"></span>
-                        2026/27 新賽季開鑼日（9月6日沙田）全 10 場賽果復盤
+                        <span id="resultsTitle">2026/27 賽季歷史全場賽果復盤</span>
                     </h2>
                     <select id="raceSelect" onchange="filterResults()" class="bg-slate-800 border border-slate-700 text-sm rounded-lg px-3 py-1.5 text-white">
-                        <option value="ALL">全部 10 場賽事</option>
-                        <option value="1">第 1 場</option>
-                        <option value="2">第 2 場</option>
-                        <option value="3">第 3 場 (特首盃)</option>
-                        <option value="4">第 4 場</option>
-                        <option value="5">第 5 場</option>
-                        <option value="6">第 6 場</option>
-                        <option value="7">第 7 場</option>
-                        <option value="8">第 8 場</option>
-                        <option value="9">第 9 場</option>
-                        <option value="10">第 10 場</option>
+                        <option value="ALL">全部場次</option>
                     </select>
                 </div>
                 <div class="overflow-x-auto">
@@ -380,12 +379,17 @@ htmlTemplate = """<!DOCTYPE html>
 
         <section id="racecardTab" class="tab-content hidden">
             <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
-                <div class="mb-4 pb-3 border-b border-slate-800">
-                    <h2 class="text-lg font-bold text-white flex items-center">
-                        <span class="w-2.5 h-2.5 bg-blue-500 rounded-full mr-2"></span>
-                        明晚跑馬地首場夜賽（2026/09/09）官方最新排位表
-                    </h2>
-                    <p class="text-xs text-slate-400 mt-1">共 8 場草地夜賽 · 已成功抓取 93 匹馬匹檔位、評分與負磅指標</p>
+                <div class="flex justify-between items-center mb-4 pb-3 border-b border-slate-800">
+                    <div>
+                        <h2 class="text-lg font-bold text-white flex items-center">
+                            <span class="w-2.5 h-2.5 bg-blue-500 rounded-full mr-2"></span>
+                            <span id="raceCardTitle">跑馬地夜賽（2026/09/16）官方最新排位表</span>
+                        </h2>
+                        <p id="raceCardSubtitle" class="text-xs text-slate-400 mt-1">共 8 場賽事 · 已成功抓取 96 匹出賽賽駒排位、評分、負磅與檔位 · 頭場預計開跑 19:10</p>
+                    </div>
+                    <select id="cardRaceSelect" onchange="filterCards()" class="bg-slate-800 border border-slate-700 text-sm rounded-lg px-3 py-1.5 text-white">
+                        <option value="ALL">全部場次</option>
+                    </select>
                 </div>
                 <div class="overflow-x-auto">
                     <table class="w-full text-left text-sm">
@@ -451,13 +455,18 @@ htmlTemplate = """<!DOCTYPE html>
                 
                 const t1Select = document.getElementById('compTime1');
                 const t2Select = document.getElementById('compTime2');
+                const matrixTimeSelect = document.getElementById('matrixTime');
                 
                 if (allTimestamps.length > 0) {
                     t1Select.innerHTML = allTimestamps.map(t => `<option value="${t}">${t}</option>`).join('');
                     t2Select.innerHTML = allTimestamps.map(t => `<option value="${t}">${t}</option>`).join('');
+                    if (matrixTimeSelect) {
+                        matrixTimeSelect.innerHTML = allTimestamps.map(t => `<option value="${t}">${t}</option>`).join('');
+                        matrixTimeSelect.value = allTimestamps[0];
+                    }
                     
-                    const early = allTimestamps.find(t => t.includes('11:30')) || allTimestamps[allTimestamps.length - 1];
-                    const late = allTimestamps.find(t => t.includes('18:00')) || allTimestamps[0];
+                    const late = allTimestamps[0];
+                    const early = allTimestamps.length > 1 ? allTimestamps[1] : allTimestamps[0];
                     t1Select.value = early;
                     t2Select.value = late;
                 }
@@ -651,7 +660,15 @@ htmlTemplate = """<!DOCTYPE html>
             document.getElementById('detailComboOdds').innerText = odds;
         }
 
-        function renderResults(list) {
+        function renderResults(list, updateFilter = true) {
+            if (updateFilter && list && list.length > 0) {
+                const distinctRaces = [...new Set(list.map(i => i.raceNo))].sort((a, b) => a - b);
+                const selectEl = document.getElementById('raceSelect');
+                if (selectEl) {
+                    selectEl.innerHTML = `<option value="ALL">全部 ${distinctRaces.length} 場賽事</option>` +
+                        distinctRaces.map(r => `<option value="${r}">第 ${r} 場</option>`).join('');
+                }
+            }
             const tbody = document.getElementById('resultsTableBody');
             tbody.innerHTML = list.map(item => {
                 const isWinner = item.placing === '1';
@@ -679,13 +696,22 @@ htmlTemplate = """<!DOCTYPE html>
         function filterResults() {
             const val = document.getElementById('raceSelect').value;
             if (val === 'ALL') {
-                renderResults(allResults);
+                renderResults(allResults, false);
             } else {
-                renderResults(allResults.filter(i => String(i.raceNo) === val));
+                renderResults(allResults.filter(i => String(i.raceNo) === val), false);
             }
         }
 
-        function renderCards(list) {
+        function filterCards() {
+            const val = document.getElementById('cardRaceSelect').value;
+            if (val === 'ALL') {
+                renderCardsTable(allCards);
+            } else {
+                renderCardsTable(allCards.filter(i => String(i.raceNo) === val));
+            }
+        }
+
+        function renderCardsTable(list) {
             const tbody = document.getElementById('cardsTableBody');
             tbody.innerHTML = list.map(item => `
                 <tr class="hover:bg-slate-800/40 transition">
@@ -703,6 +729,31 @@ htmlTemplate = """<!DOCTYPE html>
             `).join('');
         }
 
+        function renderCards(list) {
+            if (!list || list.length === 0) return;
+            const first = list[0];
+            const venueName = first.racecourse === 'HV' ? '跑馬地' : (first.racecourse === 'ST' ? '沙田' : first.racecourse);
+            const meetingType = first.racecourse === 'HV' ? '夜賽' : '日賽';
+            const distinctRaces = [...new Set(list.map(i => i.raceNo))].sort((a, b) => a - b);
+
+            const titleEl = document.getElementById('raceCardTitle');
+            if (titleEl) {
+                titleEl.textContent = `${venueName}${meetingType}（${first.raceDate}）官方最新排位表`;
+            }
+            const subEl = document.getElementById('raceCardSubtitle');
+            if (subEl) {
+                subEl.textContent = `共 ${distinctRaces.length} 場賽事 · 已成功抓取 ${list.length} 匹出賽賽駒排位、評分、負磅與檔位 · 頭場預計開跑 19:10`;
+            }
+
+            const selectEl = document.getElementById('cardRaceSelect');
+            if (selectEl && selectEl.options.length <= 1) {
+                selectEl.innerHTML = `<option value="ALL">全部 ${distinctRaces.length} 場賽事</option>` +
+                    distinctRaces.map(r => `<option value="${r}">第 ${r} 場</option>`).join('');
+            }
+
+            renderCardsTable(list);
+        }
+
         window.onload = initPage;
     </script>
 </body>
@@ -715,6 +766,9 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -723,6 +777,9 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -763,9 +820,11 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
             mode = queryParams.get("mode", [None])[0]
             interval = queryParams.get("interval", [None])[0]
             enabled = queryParams.get("enabled", [None])[0]
+            targetDate = queryParams.get("targetDate", [None])[0]
+            targetVenue = queryParams.get("targetVenue", [None])[0]
             if enabled is not None:
                 enabled = enabled.lower() in ["1", "true", "yes"]
-            updated = updateScraperConfig(mode, interval, enabled)
+            updated = updateScraperConfig(mode, interval, enabled, targetDate, targetVenue)
             self.sendJsonResponse(updated)
         elif path == "/api/scraper/trigger":
             runScraperCycle()

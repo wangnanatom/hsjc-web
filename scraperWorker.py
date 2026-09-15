@@ -5,7 +5,7 @@ import sqlite3
 import threading
 import urllib.request
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 
 baseDir = os.path.dirname(os.path.abspath(__file__))
 dbPath = os.path.join(baseDir, "hsjc.db")
@@ -18,7 +18,11 @@ scraperConfig = {
     "lastRunTime": None,
     "lastStatus": "Initialized",
     "totalRuns": 0,
-    "totalRecordsSaved": 0
+    "totalRecordsSaved": 0,
+    "targetDate": None,
+    "targetVenue": None,
+    "targetVenueName": None,
+    "firstRaceTime": None
 }
 
 def initSqliteWalMode():
@@ -35,34 +39,87 @@ def initSqliteWalMode():
     except Exception as err:
         print("[WAL Error] Failed to set WAL mode:", err)
 
+def detectNextMeeting():
+    """自动嗅探或读取即将举行的赛期与场地"""
+    # 1. 优先读取由 fetchRaceCards 生成的 race_meta.json
+    metaPath = os.path.join(baseDir, "data", "race_meta.json")
+    if os.path.exists(metaPath):
+        try:
+            with open(metaPath, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+                rDate = meta.get("raceDate", "").replace("/", "-")
+                venue = meta.get("racecourse", "HV")
+                vName = meta.get("venueName", "跑馬地")
+                rTime = meta.get("firstRaceTime", "19:10")
+                if rDate:
+                    return rDate, venue, vName, rTime
+        except Exception:
+            pass
+
+    # 2. 从 racecards.json 提取
+    cardsPath = os.path.join(baseDir, "data", "racecards.json")
+    if os.path.exists(cardsPath):
+        try:
+            with open(cardsPath, "r", encoding="utf-8") as f:
+                cards = json.load(f)
+                if cards and len(cards) > 0:
+                    rDate = cards[0].get("raceDate", "").replace("/", "-")
+                    venue = cards[0].get("racecourse", "HV")
+                    vName = "跑馬地" if venue == "HV" else "沙田"
+                    return rDate, venue, vName, "19:10" if venue == "HV" else "13:00"
+        except Exception:
+            pass
+
+    # 3. 智能按周推算默认值 (周三 HV, 周末 ST)
+    now = datetime.now()
+    weekday = now.weekday()
+    if weekday == 2: # 周三
+        return now.strftime("%Y-%m-%d"), "HV", "跑馬地", "19:10"
+    elif weekday in [5, 6]: # 周六或周日
+        return now.strftime("%Y-%m-%d"), "ST", "沙田", "13:00"
+    elif weekday < 2: # 周一/周二 -> 即将到来的周三
+        daysAhead = 2 - weekday
+        nextWed = now + timedelta(days=daysAhead)
+        return nextWed.strftime("%Y-%m-%d"), "HV", "跑馬地", "19:10"
+    else: # 周四/周五 -> 即将到来的周日
+        daysAhead = 6 - weekday
+        nextSun = now + timedelta(days=daysAhead)
+        return nextSun.strftime("%Y-%m-%d"), "ST", "沙田", "13:00"
+
 def calculateDynamicInterval():
     """根据赛事时间规律自动计算下一次轮询休眠秒数"""
     if scraperConfig["mode"] == "fixed":
         return max(10, int(scraperConfig.get("fixedInterval", 60)))
 
     now = datetime.now()
-    weekday = now.weekday() # 0=周一, 2=周三, 5=周六, 6=周日
+    todayStr = now.strftime("%Y-%m-%d")
     hour = now.hour
+    targetDate = scraperConfig.get("targetDate") or todayStr
+    targetVenue = scraperConfig.get("targetVenue") or "HV"
 
-    # 1. 跑马地夜赛（周三晚 18:00 - 23:30）
-    if weekday == 2 and 18 <= hour <= 23:
+    isTargetToday = (todayStr == targetDate)
+
+    # 1. 跑马地夜赛（比赛日当天晚 18:00 - 23:30）
+    if isTargetToday and targetVenue == "HV" and 18 <= hour <= 23:
         return 15 # 战时高频 15 秒
 
-    # 2. 沙田日赛（周日/周六下午 12:00 - 18:30）
-    if (weekday == 6 or weekday == 5) and 12 <= hour <= 18:
+    # 2. 沙田日赛（比赛日当天下竿 12:00 - 18:30）
+    if isTargetToday and targetVenue == "ST" and 12 <= hour <= 18:
         return 15 # 战时高频 15 秒
 
-    # 3. 赛事日早盘（周三白天 10:00-18:00，周日早晨 09:00-12:00）
-    if (weekday == 2 and 10 <= hour < 18) or (weekday == 6 and 9 <= hour < 12):
-        return 180 # 早盘 3 分钟
+    # 3. 赛事日早盘（比赛日当天上午）
+    if isTargetToday and ((targetVenue == "HV" and 10 <= hour < 18) or (targetVenue == "ST" and 9 <= hour < 12)):
+        return 120 # 早盘 2 分钟
 
-    # 4. 非赛马平时
-    return 1800 # 30 分钟休眠节能
+    # 4. 非赛马时段 / 赛前待命（每 10 分钟侦测一次彩池是否开盘受注）
+    return 600
 
-def fetchHkjcOddsJson(poolType="winplaodds", raceDate=None, venue="ST", raceNo="ALL"):
+def fetchHkjcOddsJson(poolType="winplaodds", raceDate=None, venue="HV", raceNo="ALL"):
     """拉取香港赛马会官方公开赔率流"""
     if not raceDate:
-        raceDate = datetime.now().strftime("%Y-%m-%d")
+        autoDate, autoVenue, _, _ = detectNextMeeting()
+        raceDate = autoDate
+        venue = autoVenue
 
     targetUrl = f"https://bet.hkjc.com/racing/getJSON.aspx?type={poolType}&date={raceDate}&venue={venue}&raceno={raceNo}"
     headers = {
@@ -79,7 +136,7 @@ def fetchHkjcOddsJson(poolType="winplaodds", raceDate=None, venue="ST", raceNo="
                 rawText = rawBytes.decode("utf-8", errors="ignore").strip()
                 if rawText.startswith("{") or rawText.startswith("["):
                     return json.loads(rawText)
-    except Exception as err:
+    except Exception:
         pass
     return None
 
@@ -164,21 +221,30 @@ def runScraperCycle():
     scraperConfig["lastRunTime"] = nowStr
     scraperConfig["totalRuns"] += 1
 
+    # 自动嗅探目标赛期与场地
+    autoDate, autoVenue, autoVName, autoTime = detectNextMeeting()
+    targetDate = scraperConfig.get("targetDate") or autoDate
+    targetVenue = scraperConfig.get("targetVenue") or autoVenue
+    scraperConfig["targetDate"] = targetDate
+    scraperConfig["targetVenue"] = targetVenue
+    scraperConfig["targetVenueName"] = autoVName
+    scraperConfig["firstRaceTime"] = autoTime
+
     try:
         # 尝试抓取 WIN/PLA
-        winData = fetchHkjcOddsJson("winplaodds")
+        winData = fetchHkjcOddsJson("winplaodds", raceDate=targetDate, venue=targetVenue)
         savedWin = saveOddsBatch(winData)
 
         # 尝试抓取 QIN
-        qinData = fetchHkjcOddsJson("qin")
+        qinData = fetchHkjcOddsJson("qin", raceDate=targetDate, venue=targetVenue)
         savedQin = saveOddsBatch(qinData)
 
         totalSaved = savedWin + savedQin
         scraperConfig["totalRecordsSaved"] += totalSaved
         if totalSaved > 0:
-            scraperConfig["lastStatus"] = f"🟢 實時採集中: 成功入庫 {totalSaved} 條賠率 ({nowStr})"
+            scraperConfig["lastStatus"] = f"🟢 實時採集中: 成功入庫 {totalSaved} 條賠率 [{targetDate} {targetVenue}] ({nowStr})"
         else:
-            scraperConfig["lastStatus"] = f"🟡 待命中: 馬會彩池未開盤/非賽馬時段，等待開盤 ({nowStr})"
+            scraperConfig["lastStatus"] = f"🟡 待命中: 目標賽期 [{targetDate} {autoVName}] 彩池尚未開盤/非賽馬時段 ({nowStr})"
     except Exception as err:
         scraperConfig["lastStatus"] = f"🔴 異常: {str(err)}"
 
@@ -232,7 +298,7 @@ def getScraperStatus():
     """获取当前採集器運行指標"""
     return scraperConfig
 
-def updateScraperConfig(mode=None, interval=None, enabled=None):
+def updateScraperConfig(mode=None, interval=None, enabled=None, targetDate=None, targetVenue=None):
     """動態調整採集配置"""
     if mode in ["smart", "fixed"]:
         scraperConfig["mode"] = mode
@@ -242,5 +308,9 @@ def updateScraperConfig(mode=None, interval=None, enabled=None):
             scraperConfig["currentInterval"] = int(interval)
     if enabled is not None:
         scraperConfig["enabled"] = bool(enabled)
+    if targetDate:
+        scraperConfig["targetDate"] = targetDate
+    if targetVenue:
+        scraperConfig["targetVenue"] = targetVenue
     wakeUpEvent.set() # 立即唤醒应用新配置
     return scraperConfig
