@@ -3,8 +3,14 @@ import socketserver
 import json
 import sqlite3
 import os
+import sys
 import urllib.parse
 from datetime import datetime
+
+# 确保控制台 UTF-8 输出且行缓冲实时刷新
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 from scraperWorker import startBackgroundWorkers, getScraperStatus, updateScraperConfig, runScraperCycle
 
 baseDir = os.path.dirname(os.path.abspath(__file__))
