@@ -5,7 +5,11 @@ import sqlite3
 import threading
 import urllib.request
 import urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
+
+def getHkTime():
+    """获取标准香港当地时间 (HKT, UTC+8)"""
+    return datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8)))
 
 baseDir = os.path.dirname(os.path.abspath(__file__))
 dbPath = os.path.join(baseDir, "hsjc.db")
@@ -71,7 +75,7 @@ def detectNextMeeting():
             pass
 
     # 3. 智能按周推算默认值 (周三 HV, 周末 ST)
-    now = datetime.now()
+    now = getHkTime()
     weekday = now.weekday()
     if weekday == 2: # 周三
         return now.strftime("%Y-%m-%d"), "HV", "跑馬地", "19:10"
@@ -91,7 +95,7 @@ def calculateDynamicInterval():
     if scraperConfig["mode"] == "fixed":
         return max(10, int(scraperConfig.get("fixedInterval", 60)))
 
-    now = datetime.now()
+    now = getHkTime()
     todayStr = now.strftime("%Y-%m-%d")
     hour = now.hour
     targetDate = scraperConfig.get("targetDate") or todayStr
@@ -161,7 +165,7 @@ def saveOddsBatch(oddsPayload):
         return 0
 
     savedCount = 0
-    collectTime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    collectTime = getHkTime().strftime("%Y-%m-%d %H:%M:%S")
 
     try:
         conn = sqlite3.connect(dbPath, timeout=10.0)
@@ -217,7 +221,7 @@ wakeUpEvent = threading.Event()
 
 def runScraperCycle():
     """执行一次完整的抓取与计算循环"""
-    nowStr = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    nowStr = getHkTime().strftime("%Y-%m-%d %H:%M:%S")
     scraperConfig["lastRunTime"] = nowStr
     scraperConfig["totalRuns"] += 1
 
