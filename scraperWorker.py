@@ -26,7 +26,9 @@ scraperConfig = {
     "targetDate": None,
     "targetVenue": None,
     "targetVenueName": None,
-    "firstRaceTime": None
+    "firstRaceTime": None,
+    "meetingClosed": False,
+    "currentTargetDate": None
 }
 
 def initSqliteWalMode():
@@ -98,25 +100,32 @@ def calculateDynamicInterval():
     now = getHkTime()
     todayStr = now.strftime("%Y-%m-%d")
     hour = now.hour
+    minute = now.minute
     targetDate = scraperConfig.get("targetDate") or todayStr
     targetVenue = scraperConfig.get("targetVenue") or "HV"
 
     isTargetToday = (todayStr == targetDate)
 
-    # 1. 跑马地夜赛（比赛日当天晚 18:00 - 23:30）
-    if isTargetToday and targetVenue == "HV" and 18 <= hour <= 23:
+    # 0. 若当天赛事已全数完赛封盘，或深宵时段（23:10 - 08:30），进入深度休眠（1小时），彻底杜绝半夜无意义空转与垃圾数据写入
+    if scraperConfig.get("meetingClosed") or (isTargetToday and ((targetVenue == "HV" and (hour >= 23 and minute >= 10)) or (targetVenue == "ST" and (hour >= 18 and minute >= 30)))) or (hour >= 23 or hour < 8):
+        return 3600
+
+    # 1. 跑马地夜赛（比赛日当天晚 18:00 - 23:05）
+    if isTargetToday and targetVenue == "HV" and 18 <= hour <= 22:
         return 15 # 战时高频 15 秒
 
-    # 2. 沙田日赛（比赛日当天下竿 12:00 - 18:30）
-    if isTargetToday and targetVenue == "ST" and 12 <= hour <= 18:
+    # 2. 沙田日赛（比赛日当天下午 12:00 - 18:20）
+    if isTargetToday and targetVenue == "ST" and 12 <= hour <= 17:
         return 15 # 战时高频 15 秒
+    if isTargetToday and targetVenue == "ST" and hour == 18 and minute <= 20:
+        return 15
 
-    # 3. 赛事日早盘（比赛日当天上午）
-    if isTargetToday and ((targetVenue == "HV" and 10 <= hour < 18) or (targetVenue == "ST" and 9 <= hour < 12)):
+    # 3. 赛事日早盘（比赛日当天上午 09:00 - 开赛前夕）
+    if isTargetToday and ((targetVenue == "HV" and 9 <= hour < 18) or (targetVenue == "ST" and 9 <= hour < 12)):
         return 120 # 早盘 2 分钟
 
-    # 4. 非赛马时段 / 赛前待命（每 10 分钟侦测一次彩池是否开盘受注）
-    return 600
+    # 4. 非赛马日 / 赛前待命（每 30 分钟检查一次）
+    return 1800
 
 import gzip
 
@@ -234,6 +243,17 @@ def runScraperCycle():
     scraperConfig["targetVenueName"] = autoVName
     scraperConfig["firstRaceTime"] = autoTime
 
+    # 若目标赛期更换，重置完赛闭环标记
+    if targetDate != scraperConfig.get("currentTargetDate"):
+        scraperConfig["meetingClosed"] = False
+        scraperConfig["currentTargetDate"] = targetDate
+
+    # 若当天赛事已被判定为全数完赛，直接跳过写库，保护历史时序
+    if scraperConfig.get("meetingClosed"):
+        scraperConfig["lastStatus"] = f"🏁 完賽封盤: 賽期 [{targetDate} {targetVenue}] 已全數完賽派彩，停止寫庫 ({nowStr})"
+        print(f"[{nowStr}] 賽期 [{targetDate} {targetVenue}] 已全數完賽封盤，跳過抓取，保持休眠。")
+        return
+
     print(f"[{nowStr}] 云端采集器启动轮询: 赛期 {targetDate} {targetVenue}...")
 
     initSqliteWalMode()
@@ -243,19 +263,33 @@ def runScraperCycle():
     winRows = []
     qinRows = []
     qplRows = []
+    anyPoolsFound = False
+    allPoolsClosed = True
 
     try:
         # 抓取 1 至 8 场彩池数据
         for raceNo in range(1, 9):
             res = fetchRaceOddsGql(targetDate, targetVenue, raceNo)
             if not res:
+                allPoolsClosed = False
                 continue
             rms = res.get("data", {}).get("raceMeetings") or []
             if not rms:
+                allPoolsClosed = False
                 continue
             pools = rms[0].get("pmPools") or []
+            if not pools:
+                allPoolsClosed = False
+                continue
+
+            anyPoolsFound = True
 
             for pool in pools:
+                sellStatus = str(pool.get("sellStatus") or "")
+                status = str(pool.get("status") or "")
+                if sellStatus != "STOP_SELL" and status not in ["PAYOUT", "FINAL"]:
+                    allPoolsClosed = False
+
                 oddsType = pool.get("oddsType")
                 oddsNodes = pool.get("oddsNodes") or []
 
@@ -298,6 +332,23 @@ def runScraperCycle():
                             qplRows.append((nowStr, raceNo, combStr, oddsVal, 0, dropVal, isHot, willPay))
                         except Exception:
                             pass
+
+        # 完赛检测与终盘去重守护
+        if anyPoolsFound and allPoolsClosed:
+            scraperConfig["meetingClosed"] = True
+            closingTimeStr = f"{targetDate} 23:00:00" if targetVenue == "HV" else f"{targetDate} 18:15:00"
+            cursor.execute("SELECT 1 FROM win WHERE CollectionDateTime = ? LIMIT 1;", (closingTimeStr,))
+            if cursor.fetchone():
+                print(f"[{nowStr}] 賽期 [{targetDate} {targetVenue}] 全天賽事已全數完賽派彩，終盤已封存在庫，停止寫入。")
+                scraperConfig["lastStatus"] = f"🏁 完賽封盤: 全天賽事已完結派彩，停止入庫 [{targetDate}] ({nowStr})"
+                conn.close()
+                return
+            else:
+                nowStr = closingTimeStr
+                winRows = [(nowStr, r[1], r[2], r[3], r[4], r[5], r[6], r[7]) for r in winRows]
+                qinRows = [(nowStr, r[1], r[2], r[3], r[4], r[5], r[6], r[7]) for r in qinRows]
+                qplRows = [(nowStr, r[1], r[2], r[3], r[4], r[5], r[6], r[7]) for r in qplRows]
+                print(f"[{nowStr}] 偵測到全天賽事已完賽派彩，入庫官方終盤收官記錄: {closingTimeStr}")
 
         if winRows:
             cursor.executemany("""

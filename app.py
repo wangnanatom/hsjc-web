@@ -382,14 +382,18 @@ htmlTemplate = """<!DOCTYPE html>
 
         <section id="resultsTab" class="tab-content hidden">
             <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-xl">
-                <div class="flex justify-between items-center mb-4 pb-3 border-b border-slate-800">
+                <div class="flex flex-wrap justify-between items-center mb-4 pb-3 border-b border-slate-800 gap-3">
                     <h2 class="text-lg font-bold text-white flex items-center">
                         <span class="w-2.5 h-2.5 bg-emerald-500 rounded-full mr-2"></span>
-                        <span id="resultsTitle">2026/27 賽季歷史全場賽果復盤</span>
+                        <span id="resultsTitle">2026/27 賽季官方全場賽果與終盤賠率復盤</span>
                     </h2>
-                    <select id="raceSelect" onchange="filterResults()" class="bg-slate-800 border border-slate-700 text-sm rounded-lg px-3 py-1.5 text-white">
-                        <option value="ALL">全部場次</option>
-                    </select>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <select id="resultDateSelect" onchange="onResultDateChange()" class="bg-slate-800 border border-slate-700 text-sm rounded-lg px-3 py-1.5 text-emerald-400 font-bold focus:outline-none">
+                        </select>
+                        <select id="raceSelect" onchange="filterResults()" class="bg-slate-800 border border-slate-700 text-sm rounded-lg px-3 py-1.5 text-white focus:outline-none">
+                            <option value="ALL">全部場次</option>
+                        </select>
+                    </div>
                 </div>
                 <div class="overflow-x-auto">
                     <table class="w-full text-left text-sm">
@@ -920,16 +924,56 @@ htmlTemplate = """<!DOCTYPE html>
             document.getElementById('detailComboOdds').innerText = odds;
         }
 
-        function renderResults(list, updateFilter = true) {
-            if (updateFilter && list && list.length > 0) {
-                const distinctRaces = [...new Set(list.map(i => i.raceNo))].sort((a, b) => a - b);
-                const selectEl = document.getElementById('raceSelect');
-                if (selectEl) {
-                    selectEl.innerHTML = `<option value="ALL">全部 ${distinctRaces.length} 場賽事</option>` +
-                        distinctRaces.map(r => `<option value="${r}">第 ${r} 場</option>`).join('');
+        function renderResults(list) {
+            if (!list || list.length === 0) return;
+            const dateSelect = document.getElementById('resultDateSelect');
+            if (dateSelect) {
+                const dates = [...new Set(list.map(i => i.raceDate.replace(/\//g, '-')))].sort((a, b) => b.localeCompare(a));
+                dateSelect.innerHTML = dates.map(d => {
+                    const label = d === '2026-09-16' ? `${d} (跑馬地夜賽 · 8場頭馬全量)` : `${d} (沙田日賽 · 開鑼日)`;
+                    return `<option value="${d}">${label}</option>`;
+                }).join('');
+                if (dates.includes('2026-09-16')) {
+                    dateSelect.value = '2026-09-16';
                 }
             }
+            onResultDateChange();
+        }
+
+        function onResultDateChange() {
+            const dateSelect = document.getElementById('resultDateSelect');
+            const dateVal = dateSelect ? dateSelect.value : 'ALL';
+            const filteredByDate = (dateVal === 'ALL' || !dateVal) 
+                ? allResults 
+                : allResults.filter(i => i.raceDate.replace(/\//g, '-') === dateVal.replace(/\//g, '-'));
+
+            const distinctRaces = [...new Set(filteredByDate.map(i => i.raceNo))].sort((a, b) => a - b);
+            const selectEl = document.getElementById('raceSelect');
+            if (selectEl) {
+                selectEl.innerHTML = `<option value="ALL">全部 ${distinctRaces.length} 場賽事</option>` +
+                    distinctRaces.map(r => `<option value="${r}">第 ${r} 場</option>`).join('');
+            }
+            filterResults();
+        }
+
+        function filterResults() {
+            const dateSelect = document.getElementById('resultDateSelect');
+            const dateVal = dateSelect ? dateSelect.value : 'ALL';
+            const raceVal = document.getElementById('raceSelect') ? document.getElementById('raceSelect').value : 'ALL';
+
+            let list = allResults;
+            if (dateVal && dateVal !== 'ALL') {
+                list = list.filter(i => i.raceDate.replace(/\//g, '-') === dateVal.replace(/\//g, '-'));
+            }
+            if (raceVal && raceVal !== 'ALL') {
+                list = list.filter(i => String(i.raceNo) === raceVal);
+            }
+            renderResultsTable(list);
+        }
+
+        function renderResultsTable(list) {
             const tbody = document.getElementById('resultsTableBody');
+            if (!tbody) return;
             tbody.innerHTML = list.map(item => {
                 const isWinner = item.placing === '1';
                 const oddsBadge = isWinner 
@@ -951,15 +995,6 @@ htmlTemplate = """<!DOCTYPE html>
                     </tr>
                 `;
             }).join('');
-        }
-
-        function filterResults() {
-            const val = document.getElementById('raceSelect').value;
-            if (val === 'ALL') {
-                renderResults(allResults, false);
-            } else {
-                renderResults(allResults.filter(i => String(i.raceNo) === val), false);
-            }
         }
 
         function filterCards() {
