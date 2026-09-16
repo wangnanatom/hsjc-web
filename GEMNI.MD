@@ -20,3 +20,9 @@
   - 为彻底解决后台高频写入（每 15 秒）与前端用户并发查询引起的 `database is locked` 报错，必须在数据库初始化时开启预写日志模式：`PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000;`，实现读写互不阻塞。
 - **自动同步与推送 GitHub 规范（用户明确指示）**：
   - 今后对 `hsjc-cloud-web`（或相关云端服务）进行的任何代码改动、UI 调整或数据更新，本地执行与测试完成后，必须**自动执行 git add、git commit 并立即推送（git push origin main）至 GitHub 仓库**，以便触发 Render 云端自动化构建与部署，确保线上云端网页始终与本地最新改动保持 100% 同步。
+- **本地宿主采集器与云端容器的数据同步架构**：
+  - 当采集器（如 Playwright）运行在本地 Windows 宿主机上持续写入本地 `hsjc.db` 时，云端容器（如 Render）读取的是云端独立文件系统，存在数据物理隔离与构建延迟。
+  - 最佳解决方案：
+    1. 前端页面必须具备定时自动轮询机制（如每 15 秒轮询 `/api/timestamps` 并动态切换最新时刻），避免用户停留在旧时刻；
+    2. 本地同机启动 Web 进程（`http://localhost:5000`），直连本地实时数据库，实现 0 延迟即时看盘；
+    3. 后台常驻守护进程增加周期性 `autoSyncToGithub()`（每 3~5 轮抓取自动推送），全自动保持云端线上网页持续更新。
