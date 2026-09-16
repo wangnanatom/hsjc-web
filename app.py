@@ -12,28 +12,19 @@ if sys.platform == "win32":
     import io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 from scraperWorker import startBackgroundWorkers, getScraperStatus, updateScraperConfig, runScraperCycle
+import dbAdapter
 
 baseDir = os.path.dirname(os.path.abspath(__file__))
 dbPath = os.path.join(baseDir, "hsjc.db")
 portNumber = int(os.environ.get("PORT", 5050))
 
-def getDbConnection():
-    conn = sqlite3.connect(dbPath, timeout=15.0)
-    conn.row_factory = sqlite3.Row
-    return conn
-
 def queryDistinctTimestamps():
-    timestamps = []
     try:
-        conn = getDbConnection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT DISTINCT CollectionDateTime FROM win ORDER BY CollectionDateTime DESC LIMIT 500;")
-        rows = cursor.fetchall()
-        timestamps = [r[0] for r in rows if r[0]]
-        conn.close()
+        rows = dbAdapter.queryAll("SELECT DISTINCT CollectionDateTime FROM win ORDER BY CollectionDateTime DESC LIMIT 500;")
+        return [r["CollectionDateTime"] for r in rows if r.get("CollectionDateTime")]
     except Exception as err:
         print("Error querying timestamps:", err)
-    return timestamps
+        return []
 
 def queryCompareData(pool="WIN", raceNo=1, time1=None, time2=None):
     compareList = []
@@ -52,32 +43,29 @@ def queryCompareData(pool="WIN", raceNo=1, time1=None, time2=None):
         oddsCol = "QplOdds"
 
     try:
-        conn = getDbConnection()
-        cursor = conn.cursor()
         time1 = (time1 or "").strip()
         time2 = (time2 or "").strip()
         if not time1 or not time2 or time1 == "undefined" or time2 == "undefined":
-            cursor.execute(f"SELECT DISTINCT CollectionDateTime FROM {tableName} ORDER BY CollectionDateTime DESC LIMIT 2;")
-            recentRows = cursor.fetchall()
+            recentRows = dbAdapter.queryAll(f"SELECT DISTINCT CollectionDateTime FROM {tableName} ORDER BY CollectionDateTime DESC LIMIT 2;")
             if len(recentRows) >= 2:
-                time2 = recentRows[0][0]
-                time1 = recentRows[1][0]
+                time2 = recentRows[0]["CollectionDateTime"]
+                time1 = recentRows[1]["CollectionDateTime"]
             elif len(recentRows) == 1:
-                time2 = recentRows[0][0]
-                time1 = recentRows[0][0]
+                time2 = recentRows[0]["CollectionDateTime"]
+                time1 = recentRows[0]["CollectionDateTime"]
             else:
                 time1 = "2026-09-06 11:30:00"
                 time2 = "2026-09-06 18:00:00"
         
         # Query Time 1
         sql1 = f"SELECT Number, {oddsCol}, Scratched, Hot FROM {tableName} WHERE CollectionDateTime = ? AND RaceNo = ?;"
-        cursor.execute(sql1, (time1, raceNo))
-        t1Dict = {str(r[0]): {"odds": float(r[1]) if r[1] else 0.0, "scratched": r[2], "hot": r[3]} for r in cursor.fetchall()}
+        rows1 = dbAdapter.queryAll(sql1, [time1, raceNo])
+        t1Dict = {str(r["Number"]): {"odds": float(r[oddsCol]) if r.get(oddsCol) is not None else 0.0, "scratched": r.get("Scratched", 0), "hot": r.get("Hot", 0)} for r in rows1}
 
         # Query Time 2
         sql2 = f"SELECT Number, {oddsCol}, Scratched, Hot FROM {tableName} WHERE CollectionDateTime = ? AND RaceNo = ?;"
-        cursor.execute(sql2, (time2, raceNo))
-        t2Dict = {str(r[0]): {"odds": float(r[1]) if r[1] else 0.0, "scratched": r[2], "hot": r[3]} for r in cursor.fetchall()}
+        rows2 = dbAdapter.queryAll(sql2, [time2, raceNo])
+        t2Dict = {str(r["Number"]): {"odds": float(r[oddsCol]) if r.get(oddsCol) is not None else 0.0, "scratched": r.get("Scratched", 0), "hot": r.get("Hot", 0)} for r in rows2}
 
         # Merge and compute differences
         allKeys = sorted(list(set(t1Dict.keys()) | set(t2Dict.keys())), key=lambda x: int(x.split('-')[0]) if '-' in x or x.isdigit() else x)
@@ -114,7 +102,6 @@ def queryCompareData(pool="WIN", raceNo=1, time1=None, time2=None):
                 topDrops.append(item)
 
         topDrops.sort(key=lambda x: x["percentChange"])
-        conn.close()
     except Exception as err:
         print("Error in queryCompareData:", err)
 
@@ -132,26 +119,22 @@ def queryMatrixData(pool="QIN", raceNo=1, timeStr=None):
     oddsCol = "QinOdds" if pool.upper() == "QIN" else "QplOdds"
     matrixData = {}
     try:
-        conn = getDbConnection()
-        cursor = conn.cursor()
         timeStr = (timeStr or "").strip()
         if not timeStr or timeStr == "undefined":
-            cursor.execute(f"SELECT DISTINCT CollectionDateTime FROM {tableName} ORDER BY CollectionDateTime DESC LIMIT 1;")
-            r = cursor.fetchone()
-            if r:
-                timeStr = r[0]
+            r = dbAdapter.queryOne(f"SELECT DISTINCT CollectionDateTime FROM {tableName} ORDER BY CollectionDateTime DESC LIMIT 1;")
+            if r and r.get("CollectionDateTime"):
+                timeStr = r["CollectionDateTime"]
 
         if timeStr:
             sql = f"SELECT Number, {oddsCol}, OddsDrop FROM {tableName} WHERE CollectionDateTime = ? AND RaceNo = ?;"
-            cursor.execute(sql, (timeStr, raceNo))
-            for row in cursor.fetchall():
-                numStr = str(row[0])
-                oddsVal = float(row[1]) if row[1] else 0.0
+            rows = dbAdapter.queryAll(sql, [timeStr, raceNo])
+            for row in rows:
+                numStr = str(row.get("Number"))
+                oddsVal = float(row[oddsCol]) if row.get(oddsCol) is not None else 0.0
                 matrixData[numStr] = {
                     "odds": oddsVal,
-                    "oddsDrop": float(row[2]) if row[2] else 0.0
+                    "oddsDrop": float(row["OddsDrop"]) if row.get("OddsDrop") is not None else 0.0
                 }
-        conn.close()
     except Exception as err:
         print("Error querying matrix data:", err)
     return {"time": timeStr, "raceNo": raceNo, "pool": pool, "matrix": matrixData}
@@ -194,6 +177,9 @@ htmlTemplate = """<!DOCTYPE html>
                     <h1 class="text-xl font-black tracking-wider text-white">hsjc 2.0</h1>
                     <span class="text-[11px] font-bold px-2 py-0.5 bg-emerald-950 text-emerald-400 border border-emerald-700/60 rounded-full flex items-center">
                         <span class="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse mr-1.5"></span>雲端專線 24/7 在線
+                    </span>
+                    <span id="dbStatusBadge" class="text-[11px] font-bold px-2 py-0.5 bg-slate-800 text-slate-400 border border-slate-700 rounded-full flex items-center">
+                        <span class="w-1.5 h-1.5 bg-slate-500 rounded-full mr-1.5"></span>資料庫偵測中...
                     </span>
                 </div>
                 <p class="text-xs text-slate-400">香港職業賽馬大戶暗盤資金流向 · 2D 矩陣深度監控終端</p>
@@ -745,6 +731,24 @@ htmlTemplate = """<!DOCTYPE html>
                 allCards = await cardRes.json();
                 renderCards(allCards);
 
+                // 載入資料庫連線狀態標籤
+                try {
+                    const dbRes = await fetch('/api/db/status');
+                    const dbInfo = await dbRes.json();
+                    const dbBadge = document.getElementById('dbStatusBadge');
+                    if (dbBadge && dbInfo) {
+                        if (dbInfo.type && dbInfo.type.includes("Turso")) {
+                            dbBadge.className = "text-[11px] font-bold px-2 py-0.5 bg-indigo-950 text-indigo-300 border border-indigo-700/60 rounded-full flex items-center shadow-sm";
+                            dbBadge.innerHTML = `<span class="w-1.5 h-1.5 bg-indigo-400 rounded-full mr-1.5"></span>☁️ Turso 雲端庫 (已連通)`;
+                        } else {
+                            dbBadge.className = "text-[11px] font-bold px-2 py-0.5 bg-slate-800 text-slate-300 border border-slate-700 rounded-full flex items-center";
+                            dbBadge.innerHTML = `<span class="w-1.5 h-1.5 bg-emerald-400 rounded-full mr-1.5"></span>💾 本地 SQLite (已連通)`;
+                        }
+                    }
+                } catch (e) {
+                    console.warn("無法取得資料庫狀態:", e);
+                }
+
             } catch (err) {
                 console.error("初始化載入失敗:", err);
             }
@@ -1162,6 +1166,8 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
             elif path == "/api/scraper/trigger":
                 runScraperCycle()
                 self.sendJsonResponse(getScraperStatus())
+            elif path == "/api/db/status":
+                self.sendJsonResponse(dbAdapter.getDatabaseStatus())
             else:
                 self.send_response(404)
                 self.end_headers()

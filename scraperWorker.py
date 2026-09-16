@@ -6,6 +6,7 @@ import threading
 import urllib.request
 import urllib.parse
 from datetime import datetime, timezone, timedelta
+import dbAdapter
 
 def getHkTime():
     """获取标准香港当地时间 (HKT, UTC+8)"""
@@ -32,7 +33,9 @@ scraperConfig = {
 }
 
 def initSqliteWalMode():
-    """初始化 SQLite WAL 模式，确保并发读写无锁冲突"""
+    """初始化本地 SQLite WAL 模式，若接入 Turso 云端则由云端自动接管事务"""
+    if dbAdapter.isTursoEnabled():
+        return
     try:
         conn = sqlite3.connect(dbPath, timeout=10.0)
         cursor = conn.cursor()
@@ -41,7 +44,7 @@ def initSqliteWalMode():
         cursor.execute("PRAGMA busy_timeout = 5000;")
         conn.commit()
         conn.close()
-        print("[WAL] SQLite initialized in WAL mode successfully.")
+        print("[WAL] Local SQLite initialized in WAL mode.")
     except Exception as err:
         print("[WAL Error] Failed to set WAL mode:", err)
 
@@ -211,19 +214,28 @@ def fetchRaceOddsGql(dateStr, venueCode, raceNo):
         print(f"[GraphQL Error Race {raceNo}] {err}")
     return None
 
-def computeOddsDrop(conn, tableName, raceNo, numberKey, currentOdds, oddsColName):
-    """自动查询该马匹/组合在当场的初始早盘赔率，计算跌幅"""
+baseOddsCache = {}
+
+def getBaseOdds(tableName, raceNo, numberKey, oddsColName):
+    cacheKey = f"{tableName}_{raceNo}_{numberKey}"
+    if cacheKey in baseOddsCache:
+        return baseOddsCache[cacheKey]
     try:
-        cursor = conn.cursor()
         sql = f"SELECT {oddsColName} FROM {tableName} WHERE RaceNo = ? AND Number = ? ORDER BY CollectionDateTime ASC LIMIT 1;"
-        cursor.execute(sql, (raceNo, str(numberKey)))
-        row = cursor.fetchone()
-        if row and row[0] and float(row[0]) > 0:
-            baseOdds = float(row[0])
-            drop = round(currentOdds - baseOdds, 2)
-            return drop
+        row = dbAdapter.queryOne(sql, [raceNo, str(numberKey)])
+        if row and row.get(oddsColName) is not None and float(row[oddsColName]) > 0:
+            val = float(row[oddsColName])
+            baseOddsCache[cacheKey] = val
+            return val
     except Exception:
         pass
+    return None
+
+def computeOddsDrop(tableName, raceNo, numberKey, currentOdds, oddsColName):
+    """自动查询该马匹/组合在当场的初始早盘赔率，计算跌幅（内存高效缓存）"""
+    baseOdds = getBaseOdds(tableName, raceNo, numberKey, oddsColName)
+    if baseOdds and baseOdds > 0:
+        return round(currentOdds - baseOdds, 2)
     return 0.0
 
 wakeUpEvent = threading.Event()
@@ -243,10 +255,11 @@ def runScraperCycle():
     scraperConfig["targetVenueName"] = autoVName
     scraperConfig["firstRaceTime"] = autoTime
 
-    # 若目标赛期更换，重置完赛闭环标记
+    # 若目标赛期更换，重置完赛闭环标记并清空基准缓存
     if targetDate != scraperConfig.get("currentTargetDate"):
         scraperConfig["meetingClosed"] = False
         scraperConfig["currentTargetDate"] = targetDate
+        baseOddsCache.clear()
 
     # 若当天赛事已被判定为全数完赛，直接跳过写库，保护历史时序
     if scraperConfig.get("meetingClosed"):
@@ -257,8 +270,6 @@ def runScraperCycle():
     print(f"[{nowStr}] 云端采集器启动轮询: 赛期 {targetDate} {targetVenue}...")
 
     initSqliteWalMode()
-    conn = sqlite3.connect(dbPath, timeout=15.0)
-    cursor = conn.cursor()
 
     winRows = []
     qinRows = []
@@ -302,7 +313,7 @@ def runScraperCycle():
                             oddsVal = float(node.get("oddsValue") or 0.0)
                             isHot = 1 if node.get("hotFavourite") or (0 < oddsVal <= 3.0) else 0
                             willPay = str(int(oddsVal * 1000)) if oddsVal > 0 else "0"
-                            dropVal = computeOddsDrop(conn, "win", raceNo, horseNo, oddsVal, "WinOdds")
+                            dropVal = computeOddsDrop("win", raceNo, horseNo, oddsVal, "WinOdds")
                             if dropVal <= -3.0:
                                 isHot = 1
                             winRows.append((nowStr, raceNo, horseNo, oddsVal, 0, dropVal, isHot, willPay))
@@ -316,7 +327,7 @@ def runScraperCycle():
                             oddsVal = float(node.get("oddsValue") or 0.0)
                             isHot = 1 if node.get("hotFavourite") else 0
                             willPay = str(int(oddsVal * 1000)) if oddsVal > 0 else "0"
-                            dropVal = computeOddsDrop(conn, "qin", raceNo, combStr, oddsVal, "QinOdds")
+                            dropVal = computeOddsDrop("qin", raceNo, combStr, oddsVal, "QinOdds")
                             qinRows.append((nowStr, raceNo, combStr, oddsVal, 0, dropVal, isHot, willPay))
                         except Exception:
                             pass
@@ -328,7 +339,7 @@ def runScraperCycle():
                             oddsVal = float(node.get("oddsValue") or 0.0)
                             isHot = 1 if node.get("hotFavourite") else 0
                             willPay = str(int(oddsVal * 1000)) if oddsVal > 0 else "0"
-                            dropVal = computeOddsDrop(conn, "qpl", raceNo, combStr, oddsVal, "QplOdds")
+                            dropVal = computeOddsDrop("qpl", raceNo, combStr, oddsVal, "QplOdds")
                             qplRows.append((nowStr, raceNo, combStr, oddsVal, 0, dropVal, isHot, willPay))
                         except Exception:
                             pass
@@ -337,11 +348,10 @@ def runScraperCycle():
         if anyPoolsFound and allPoolsClosed:
             scraperConfig["meetingClosed"] = True
             closingTimeStr = f"{targetDate} 23:00:00" if targetVenue == "HV" else f"{targetDate} 18:15:00"
-            cursor.execute("SELECT 1 FROM win WHERE CollectionDateTime = ? LIMIT 1;", (closingTimeStr,))
-            if cursor.fetchone():
+            r = dbAdapter.queryOne("SELECT 1 as found FROM win WHERE CollectionDateTime = ? LIMIT 1;", [closingTimeStr])
+            if r and r.get("found"):
                 print(f"[{nowStr}] 賽期 [{targetDate} {targetVenue}] 全天賽事已全數完賽派彩，終盤已封存在庫，停止寫入。")
                 scraperConfig["lastStatus"] = f"🏁 完賽封盤: 全天賽事已完結派彩，停止入庫 [{targetDate}] ({nowStr})"
-                conn.close()
                 return
             else:
                 nowStr = closingTimeStr
@@ -351,22 +361,20 @@ def runScraperCycle():
                 print(f"[{nowStr}] 偵測到全天賽事已完賽派彩，入庫官方終盤收官記錄: {closingTimeStr}")
 
         if winRows:
-            cursor.executemany("""
+            dbAdapter.executeMany("""
                 INSERT INTO win (CollectionDateTime, RaceNo, Number, WinOdds, Scratched, OddsDrop, Hot, WillPay)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?);
             """, winRows)
         if qinRows:
-            cursor.executemany("""
+            dbAdapter.executeMany("""
                 INSERT INTO qin (CollectionDateTime, RaceNo, Number, QinOdds, Scratched, OddsDrop, Hot, WillPay)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?);
             """, qinRows)
         if qplRows:
-            cursor.executemany("""
+            dbAdapter.executeMany("""
                 INSERT INTO qpl (CollectionDateTime, RaceNo, Number, QplOdds, Scratched, OddsDrop, Hot, WillPay)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?);
             """, qplRows)
-
-        conn.commit()
         totalSaved = len(winRows) + len(qinRows) + len(qplRows)
         scraperConfig["totalRecordsSaved"] += totalSaved
 
