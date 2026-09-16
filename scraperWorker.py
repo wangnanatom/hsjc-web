@@ -118,30 +118,88 @@ def calculateDynamicInterval():
     # 4. 非赛马时段 / 赛前待命（每 10 分钟侦测一次彩池是否开盘受注）
     return 600
 
-def fetchHkjcOddsJson(poolType="winplaodds", raceDate=None, venue="HV", raceNo="ALL"):
-    """拉取香港赛马会官方公开赔率流"""
-    if not raceDate:
-        autoDate, autoVenue, _, _ = detectNextMeeting()
-        raceDate = autoDate
-        venue = autoVenue
+import gzip
 
-    targetUrl = f"https://bet.hkjc.com/racing/getJSON.aspx?type={poolType}&date={raceDate}&venue={venue}&raceno={raceNo}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Referer": "https://bet.hkjc.com/racing/pages/odds_wp.aspx"
+# 马会官方 Whitelisted GraphQL 查询模板（必须保持字符完全一致以通过白名单校验）
+HKJC_GRAPHQL_QUERY = """query racing($date: String, $venueCode: String, $oddsTypes: [OddsType], $raceNo: Int) {
+  raceMeetings(date: $date, venueCode: $venueCode) {
+    pmPools(oddsTypes: $oddsTypes, raceNo: $raceNo) {
+      id
+      status
+      sellStatus
+      oddsType
+      lastUpdateTime
+      guarantee
+      minTicketCost
+      name_en
+      name_ch
+      leg {
+        number
+        races
+      }
+      cWinSelections {
+        composite
+        name_ch
+        name_en
+        starters
+      }
+      oddsNodes {
+        combString
+        oddsValue
+        hotFavourite
+        oddsDropValue
+        bankerOdds {
+          combString
+          oddsValue
+        }
+      }
     }
+  }
+}"""
 
+def normalizeCombination(combString):
+    """将马会组合字符串 '07,11' 转换为标准格式 '7-11'"""
     try:
-        req = urllib.request.Request(targetUrl, headers=headers)
-        with urllib.request.urlopen(req, timeout=12) as res:
-            if res.status == 200:
-                rawBytes = res.read()
-                rawText = rawBytes.decode("utf-8", errors="ignore").strip()
-                if rawText.startswith("{") or rawText.startswith("["):
-                    return json.loads(rawText)
+        parts = [int(p.strip()) for p in combString.split(",") if p.strip()]
+        parts.sort()
+        return f"{parts[0]}-{parts[1]}"
     except Exception:
-        pass
+        return combString.replace(",", "-")
+
+def fetchRaceOddsGql(dateStr, venueCode, raceNo):
+    """通过纯标准 HTTP POST 请求官方 GraphQL 接口拉取实盘彩池赔率"""
+    payload = {
+        "operationName": "racing",
+        "query": HKJC_GRAPHQL_QUERY,
+        "variables": {
+            "date": dateStr,
+            "venueCode": venueCode,
+            "raceNo": raceNo,
+            "oddsTypes": ["WIN", "PLA", "QIN", "QPL"]
+        }
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Content-Type": "application/json",
+        "Referer": "https://bet.hkjc.com/",
+        "Origin": "https://bet.hkjc.com",
+        "Accept": "*/*",
+        "Accept-Encoding": "gzip, deflate"
+    }
+    try:
+        req = urllib.request.Request(
+            "https://info.cld.hkjc.com/graphql/base/",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=12) as res:
+            raw = res.read()
+            if raw[:2] == b"\x1f\x8b":
+                raw = gzip.decompress(raw)
+            return json.loads(raw.decode("utf-8"))
+    except Exception as err:
+        print(f"[GraphQL Error Race {raceNo}] {err}")
     return None
 
 def computeOddsDrop(conn, tableName, raceNo, numberKey, currentOdds, oddsColName):
@@ -149,7 +207,7 @@ def computeOddsDrop(conn, tableName, raceNo, numberKey, currentOdds, oddsColName
     try:
         cursor = conn.cursor()
         sql = f"SELECT {oddsColName} FROM {tableName} WHERE RaceNo = ? AND Number = ? ORDER BY CollectionDateTime ASC LIMIT 1;"
-        cursor.execute(sql, (raceNo, numberKey))
+        cursor.execute(sql, (raceNo, str(numberKey)))
         row = cursor.fetchone()
         if row and row[0] and float(row[0]) > 0:
             baseOdds = float(row[0])
@@ -159,68 +217,10 @@ def computeOddsDrop(conn, tableName, raceNo, numberKey, currentOdds, oddsColName
         pass
     return 0.0
 
-def saveOddsBatch(oddsPayload):
-    """解析并批量保存 WIN, PLA, QIN, QPL 赔率"""
-    if not oddsPayload or not isinstance(oddsPayload, dict):
-        return 0
-
-    savedCount = 0
-    collectTime = getHkTime().strftime("%Y-%m-%d %H:%M:%S")
-
-    try:
-        conn = sqlite3.connect(dbPath, timeout=10.0)
-        cursor = conn.cursor()
-
-        # 1. 解析 WIN / PLA
-        races = oddsPayload.get("RACES") or oddsPayload.get("races") or []
-        for raceItem in races:
-            raceNo = int(raceItem.get("RACENO") or raceItem.get("raceNo") or 1)
-            
-            # 解析 WIN
-            winList = raceItem.get("WIN") or raceItem.get("win") or []
-            for w in winList:
-                horseNo = int(w.get("NUM") or w.get("num") or 0)
-                if horseNo <= 0:
-                    continue
-                winOdds = float(w.get("ODDS") or w.get("odds") or 0.0)
-                scratched = 1 if str(w.get("SCR", "0")) == "1" else 0
-                dropVal = computeOddsDrop(conn, "win", raceNo, horseNo, winOdds, "WinOdds")
-                hotVal = 1 if dropVal <= -3.0 or (winOdds > 0 and winOdds <= 3.0) else 0
-                willPay = str(int(winOdds * 1000)) if winOdds > 0 else "0"
-
-                cursor.execute("""
-                    INSERT INTO win (CollectionDateTime, RaceNo, Number, WinOdds, Scratched, OddsDrop, Hot, WillPay)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?);
-                """, (collectTime, raceNo, horseNo, winOdds, scratched, dropVal, hotVal, willPay))
-                savedCount += 1
-
-            # 解析 QIN / QPL
-            qinList = raceItem.get("QIN") or raceItem.get("qin") or []
-            for q in qinList:
-                comb = str(q.get("COMB") or q.get("comb") or q.get("NUM") or "")
-                if not comb:
-                    continue
-                qinOdds = float(q.get("ODDS") or q.get("odds") or 0.0)
-                dropVal = computeOddsDrop(conn, "qin", raceNo, comb, qinOdds, "QinOdds")
-                hotVal = 1 if dropVal <= -5.0 or (qinOdds > 0 and qinOdds <= 6.0) else 0
-
-                cursor.execute("""
-                    INSERT INTO qin (CollectionDateTime, RaceNo, Number, QinOdds, Scratched, OddsDrop, Hot, WillPay)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?);
-                """, (collectTime, raceNo, comb, qinOdds, 0, dropVal, hotVal, "0"))
-                savedCount += 1
-
-        conn.commit()
-        conn.close()
-    except Exception as err:
-        print("[Save Error] Failed to save odds batch:", err)
-
-    return savedCount
-
 wakeUpEvent = threading.Event()
 
 def runScraperCycle():
-    """执行一次完整的抓取与计算循环"""
+    """执行一次完整的抓取与入库计算循环 (纯 HTTP 极速模式，适用于云端容器)"""
     nowStr = getHkTime().strftime("%Y-%m-%d %H:%M:%S")
     scraperConfig["lastRunTime"] = nowStr
     scraperConfig["totalRuns"] += 1
@@ -234,23 +234,103 @@ def runScraperCycle():
     scraperConfig["targetVenueName"] = autoVName
     scraperConfig["firstRaceTime"] = autoTime
 
+    print(f"[{nowStr}] 云端采集器启动轮询: 赛期 {targetDate} {targetVenue}...")
+
+    initSqliteWalMode()
+    conn = sqlite3.connect(dbPath, timeout=15.0)
+    cursor = conn.cursor()
+
+    winRows = []
+    qinRows = []
+    qplRows = []
+
     try:
-        # 尝试抓取 WIN/PLA
-        winData = fetchHkjcOddsJson("winplaodds", raceDate=targetDate, venue=targetVenue)
-        savedWin = saveOddsBatch(winData)
+        # 抓取 1 至 8 场彩池数据
+        for raceNo in range(1, 9):
+            res = fetchRaceOddsGql(targetDate, targetVenue, raceNo)
+            if not res:
+                continue
+            rms = res.get("data", {}).get("raceMeetings") or []
+            if not rms:
+                continue
+            pools = rms[0].get("pmPools") or []
 
-        # 尝试抓取 QIN
-        qinData = fetchHkjcOddsJson("qin", raceDate=targetDate, venue=targetVenue)
-        savedQin = saveOddsBatch(qinData)
+            for pool in pools:
+                oddsType = pool.get("oddsType")
+                oddsNodes = pool.get("oddsNodes") or []
 
-        totalSaved = savedWin + savedQin
+                if oddsType == "WIN":
+                    for node in oddsNodes:
+                        try:
+                            horseNo = int(node.get("combString", "0"))
+                            if horseNo <= 0:
+                                continue
+                            oddsVal = float(node.get("oddsValue") or 0.0)
+                            isHot = 1 if node.get("hotFavourite") or (0 < oddsVal <= 3.0) else 0
+                            willPay = str(int(oddsVal * 1000)) if oddsVal > 0 else "0"
+                            dropVal = computeOddsDrop(conn, "win", raceNo, horseNo, oddsVal, "WinOdds")
+                            if dropVal <= -3.0:
+                                isHot = 1
+                            winRows.append((nowStr, raceNo, horseNo, oddsVal, 0, dropVal, isHot, willPay))
+                        except Exception:
+                            pass
+
+                elif oddsType == "QIN":
+                    for node in oddsNodes:
+                        try:
+                            combStr = normalizeCombination(node.get("combString", ""))
+                            oddsVal = float(node.get("oddsValue") or 0.0)
+                            isHot = 1 if node.get("hotFavourite") else 0
+                            willPay = str(int(oddsVal * 1000)) if oddsVal > 0 else "0"
+                            dropVal = computeOddsDrop(conn, "qin", raceNo, combStr, oddsVal, "QinOdds")
+                            qinRows.append((nowStr, raceNo, combStr, oddsVal, 0, dropVal, isHot, willPay))
+                        except Exception:
+                            pass
+
+                elif oddsType == "QPL":
+                    for node in oddsNodes:
+                        try:
+                            combStr = normalizeCombination(node.get("combString", ""))
+                            oddsVal = float(node.get("oddsValue") or 0.0)
+                            isHot = 1 if node.get("hotFavourite") else 0
+                            willPay = str(int(oddsVal * 1000)) if oddsVal > 0 else "0"
+                            dropVal = computeOddsDrop(conn, "qpl", raceNo, combStr, oddsVal, "QplOdds")
+                            qplRows.append((nowStr, raceNo, combStr, oddsVal, 0, dropVal, isHot, willPay))
+                        except Exception:
+                            pass
+
+        if winRows:
+            cursor.executemany("""
+                INSERT INTO win (CollectionDateTime, RaceNo, Number, WinOdds, Scratched, OddsDrop, Hot, WillPay)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            """, winRows)
+        if qinRows:
+            cursor.executemany("""
+                INSERT INTO qin (CollectionDateTime, RaceNo, Number, QinOdds, Scratched, OddsDrop, Hot, WillPay)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            """, qinRows)
+        if qplRows:
+            cursor.executemany("""
+                INSERT INTO qpl (CollectionDateTime, RaceNo, Number, QplOdds, Scratched, OddsDrop, Hot, WillPay)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            """, qplRows)
+
+        conn.commit()
+        totalSaved = len(winRows) + len(qinRows) + len(qplRows)
         scraperConfig["totalRecordsSaved"] += totalSaved
+
         if totalSaved > 0:
             scraperConfig["lastStatus"] = f"🟢 實時採集中: 成功入庫 {totalSaved} 條賠率 [{targetDate} {targetVenue}] ({nowStr})"
+            print(f"[{nowStr}] 入库成功: {totalSaved} 条 (WIN:{len(winRows)}, QIN:{len(qinRows)}, QPL:{len(qplRows)})")
         else:
             scraperConfig["lastStatus"] = f"🟡 待命中: 目標賽期 [{targetDate} {autoVName}] 彩池尚未開盤/非賽馬時段 ({nowStr})"
+            print(f"[{nowStr}] 彩池暂未开盘或等待中。")
     except Exception as err:
         scraperConfig["lastStatus"] = f"🔴 異常: {str(err)}"
+        print(f"[Scraper Error] {err}")
+        conn.rollback()
+    finally:
+        conn.close()
 
 def autoScraperLoop():
     """主抓取守护循环"""
