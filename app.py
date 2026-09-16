@@ -205,7 +205,13 @@ htmlTemplate = """<!DOCTYPE html>
     <main class="flex-1 p-4 sm:p-6 max-w-7xl mx-auto w-full space-y-6">
         <section id="compareTab" class="tab-content">
             <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-xl mb-4">
-                <div class="flex flex-wrap items-center justify-between gap-4">
+                <div class="flex items-center space-x-3">
+                    <div id="liveStatusBadge" class="text-xs bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 px-3 py-1 rounded-full flex items-center shadow-sm">
+                        <span class="w-2 h-2 bg-emerald-400 rounded-full animate-pulse mr-2"></span>
+                        🟢 實盤全自動同步中 · 15秒輪詢
+                    </div>
+                </div>
+                <div class="flex flex-wrap items-center justify-between gap-4 mt-3 pt-3 border-t border-slate-800/80">
                     <div class="flex flex-wrap items-center gap-3">
                         <div>
                             <label class="text-xs font-semibold text-slate-400 block mb-1">玩法選擇</label>
@@ -754,7 +760,55 @@ htmlTemplate = """<!DOCTYPE html>
             renderCardsTable(list);
         }
 
-        window.onload = initPage;
+        let lastSeenTimestamp = null;
+        async function checkAndAutoRefresh() {
+            try {
+                const res = await fetch('/api/timestamps?_t=' + Date.now());
+                const tsList = await res.json();
+                if (tsList && tsList.length > 0) {
+                    const latest = tsList[0];
+                    const badge = document.getElementById('liveStatusBadge');
+                    if (badge) {
+                        badge.innerHTML = `<span class="w-2 h-2 bg-emerald-400 rounded-full animate-pulse mr-2"></span>🟢 實盤全自動同步中 · 最新時刻: <span class="font-mono font-bold text-white ml-1">${latest}</span>`;
+                    }
+
+                    if (lastSeenTimestamp && latest !== lastSeenTimestamp) {
+                        console.log("[AutoRefresh] 偵測到新盤口時間戳:", latest);
+                        allTimestamps = tsList;
+                        const t1Select = document.getElementById('compTime1');
+                        const t2Select = document.getElementById('compTime2');
+                        const matrixTimeSelect = document.getElementById('matrixTime');
+
+                        const prevT1 = t1Select.value;
+                        t1Select.innerHTML = allTimestamps.map(t => `<option value="${t}">${t}</option>`).join('');
+                        t2Select.innerHTML = allTimestamps.map(t => `<option value="${t}">${t}</option>`).join('');
+                        t1Select.value = prevT1;
+                        t2Select.value = latest;
+
+                        if (matrixTimeSelect) {
+                            matrixTimeSelect.innerHTML = allTimestamps.map(t => `<option value="${t}">${t}</option>`).join('');
+                            matrixTimeSelect.value = latest;
+                        }
+
+                        await loadCompareData();
+                        if (!document.getElementById('matrixTab').classList.contains('hidden')) {
+                            await loadMatrixData();
+                        }
+                    }
+                    lastSeenTimestamp = latest;
+                }
+            } catch (err) {
+                console.warn("[AutoRefresh] 輪詢失敗:", err);
+            }
+        }
+
+        window.onload = async () => {
+            await initPage();
+            if (allTimestamps.length > 0) {
+                lastSeenTimestamp = allTimestamps[0];
+            }
+            setInterval(checkAndAutoRefresh, 15000);
+        };
     </script>
 </body>
 </html>

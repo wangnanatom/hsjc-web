@@ -268,9 +268,25 @@ def scrapeLiveOddsOnce(targetDate=None, targetVenue=None, maxRaces=8):
     print(f"[{collectTime}] 采集周期结束，耗时: {elapsed:.2f} 秒")
     return totalRecords, elapsed, collectTime
 
+def autoSyncToGithub():
+    """将采集到的最新数据库定期推送至 GitHub 触发 Render 自动同步"""
+    import subprocess
+    try:
+        cmd = 'git add hsjc.db; git commit -m "data: periodic live odds auto-sync"; git push origin main'
+        res = subprocess.run(["powershell", "-Command", cmd], cwd=baseDir, capture_output=True, text=True, timeout=40)
+        if res.returncode == 0:
+            print("[Git AutoSync] 成功将最新实盘数据同步推送到 GitHub 远程仓库！")
+        else:
+            errOut = (res.stderr or res.stdout or "").strip()
+            if "nothing to commit" not in errOut:
+                print(f"[Git AutoSync] 同步反馈: {errOut[:200]}")
+    except Exception as e:
+        print(f"[Git AutoSync Exception] {e}")
+
 def runContinuousWorker():
     """常驻后台轮询采集主循环"""
     print("[Playwright Worker] 启动常驻轮询服务...")
+    cycleCount = 0
     while True:
         try:
             nowHk = getHkTime()
@@ -290,7 +306,13 @@ def runContinuousWorker():
                 elif 9 <= hour <= 18:
                     sleepInterval = 120
 
-            scrapeLiveOddsOnce()
+            totalRec, _, _ = scrapeLiveOddsOnce()
+            cycleCount += 1
+
+            # 每 3 个周期 (约 6 分钟) 自动推送 GitHub 一次，确保云端 Render 也是最新
+            if cycleCount % 3 == 0 and totalRec > 0:
+                autoSyncToGithub()
+
             print(f"[Playwright Worker] 下次采集将在 {sleepInterval} 秒后执行...\n")
             time.sleep(sleepInterval)
         except KeyboardInterrupt:
