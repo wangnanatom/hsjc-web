@@ -7,10 +7,10 @@ import argparse
 from datetime import datetime, timezone, timedelta
 from playwright.sync_api import sync_playwright
 
-# 确保控制台 UTF-8 输出
+# 确保控制台 UTF-8 输出且行缓冲实时刷新
 if sys.platform == "win32":
     import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
 baseDir = os.path.dirname(os.path.abspath(__file__))
 dbPath = os.path.join(baseDir, "hsjc.db")
