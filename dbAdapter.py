@@ -2,6 +2,14 @@ import os
 import sys
 import libsql_client
 
+# 解决 Windows 下 Python 3.8 asyncio 退出时的 Event loop is closed 警告
+if sys.platform == "win32":
+    import asyncio
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
+
 baseDir = os.path.dirname(os.path.abspath(__file__))
 defaultDbPath = os.path.join(baseDir, "hsjc.db")
 
@@ -21,6 +29,10 @@ if os.path.exists(envPath) and (not tursoUrl or not tursoToken):
                     tursoToken = line.split("=", 1)[1].strip().strip('"').strip("'")
     except Exception:
         pass
+
+# 核心兼容处理：将 libsql:// 自动标准化为 https:// (走稳健的 Hrana over HTTP 管道，避免 WebSocket 握手 400 异常)
+if tursoUrl.startswith("libsql://"):
+    tursoUrl = "https://" + tursoUrl[len("libsql://"):]
 
 def isTursoEnabled():
     return bool(tursoUrl and tursoToken)

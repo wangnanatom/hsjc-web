@@ -1,5 +1,10 @@
 import os
 import sys
+
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+
 import sqlite3
 import libsql_client
 from dbAdapter import isTursoEnabled, tursoUrl, tursoToken, baseDir, defaultDbPath
@@ -76,7 +81,7 @@ def migrateData():
                 placeholders = ", ".join(["?"] * len(cols))
                 insertSql = f"INSERT OR REPLACE INTO {table} ({colNames}) VALUES ({placeholders});"
 
-                chunkSize = 100
+                chunkSize = 250
                 transferred = 0
                 for i in range(0, totalRows, chunkSize):
                     chunk = rows[i:i + chunkSize]
