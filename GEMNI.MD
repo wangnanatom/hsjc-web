@@ -23,3 +23,5 @@
 - **云端免浏览器（Zero-Browser）极速全自主采集架构**：
   - 虽然马会启用了 CIAM WAF 防护，但只要 HTTP 请求携带官方前端完全一致的 whitelisted GraphQL 模板、正确的 `Referer` 与 `Origin: https://bet.hkjc.com`，马会服务端会直接返回 HTTP 200 及 Gzip 压缩流。
   - 核心价值：无需在云端安装 Chromium/Playwright（免去 500MB 内存开销与 apt 依赖问题），仅用 Python 内置 `urllib.request` + `gzip` 即可在 Render 免费容器中运行（单场抓取仅需 0.3 秒，全天 8 场仅需 2 秒）。容器启动时通过守护线程自启采集，实现云端完全脱离本地电脑独立 7×24 小时自主采集。
+- **Windows 本地默认端口 5000 静默重置冲突**：
+  - Windows 系统组件（如 UPnP、SSDP 或 Game Services）有时会静默占用或阻断 5000 端口，导致客户端请求时报 `RemoteDisconnected`（服务端立即断开连接）。本地开发服务应使用 `5050` 作为兜底默认端口：`int(os.environ.get("PORT", 5050))`，既保证云端 Render 动态端口生效，又彻底规避 Windows 本地端口劫持。
