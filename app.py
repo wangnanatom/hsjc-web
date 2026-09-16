@@ -27,7 +27,7 @@ def queryDistinctTimestamps():
     try:
         conn = getDbConnection()
         cursor = conn.cursor()
-        cursor.execute("SELECT DISTINCT CollectionDateTime FROM win ORDER BY CollectionDateTime DESC LIMIT 250;")
+        cursor.execute("SELECT DISTINCT CollectionDateTime FROM win ORDER BY CollectionDateTime DESC LIMIT 500;")
         rows = cursor.fetchall()
         timestamps = [r[0] for r in rows if r[0]]
         conn.close()
@@ -240,6 +240,11 @@ htmlTemplate = """<!DOCTYPE html>
                 <div class="flex flex-wrap items-center justify-between gap-4 mt-3 pt-3 border-t border-slate-800/80">
                     <div class="flex flex-wrap items-center gap-3">
                         <div>
+                            <label class="text-xs font-semibold text-slate-400 block mb-1">賽事日期 (Date)</label>
+                            <select id="compDateSelect" onchange="onDateChange()" class="bg-slate-800 border border-slate-700 text-sm font-bold text-emerald-400 rounded-lg px-3 py-1.5 focus:outline-none focus:border-blue-500">
+                            </select>
+                        </div>
+                        <div>
                             <label class="text-xs font-semibold text-slate-400 block mb-1">玩法選擇</label>
                             <select id="compPool" onchange="loadCompareData()" class="bg-slate-800 border border-slate-700 text-sm font-bold text-amber-400 rounded-lg px-3 py-1.5 focus:outline-none focus:border-blue-500">
                                 <option value="WIN">獨贏 (WIN)</option>
@@ -250,7 +255,7 @@ htmlTemplate = """<!DOCTYPE html>
                         </div>
                         <div>
                             <label class="text-xs font-semibold text-slate-400 block mb-1">場次 (Race)</label>
-                            <select id="compRaceNo" onchange="loadCompareData()" class="bg-slate-800 border border-slate-700 text-sm font-bold text-white rounded-lg px-3 py-1.5 focus:outline-none focus:border-blue-500">
+                            <select id="compRaceNo" onchange="onRaceChange()" class="bg-slate-800 border border-slate-700 text-sm font-bold text-white rounded-lg px-3 py-1.5 focus:outline-none focus:border-blue-500">
                                 <option value="1">第 1 場</option>
                                 <option value="2">第 2 場</option>
                                 <option value="3">第 3 場</option>
@@ -265,12 +270,12 @@ htmlTemplate = """<!DOCTYPE html>
                         </div>
                         <div>
                             <label class="text-xs font-semibold text-slate-400 block mb-1">基準時刻 (Time 1)</label>
-                            <select id="compTime1" onchange="loadCompareData()" class="bg-slate-800 border border-slate-700 text-xs text-slate-300 rounded-lg px-3 py-1.5 focus:outline-none focus:border-blue-500">
+                            <select id="compTime1" onchange="loadCompareData()" class="bg-slate-800 border border-slate-700 text-xs text-slate-300 rounded-lg px-3 py-1.5 focus:outline-none focus:border-blue-500 max-w-[230px]">
                             </select>
                         </div>
                         <div>
                             <label class="text-xs font-semibold text-slate-400 block mb-1">臨場時刻 (Time 2)</label>
-                            <select id="compTime2" onchange="loadCompareData()" class="bg-slate-800 border border-slate-700 text-xs text-slate-300 rounded-lg px-3 py-1.5 focus:outline-none focus:border-blue-500">
+                            <select id="compTime2" onchange="loadCompareData()" class="bg-slate-800 border border-slate-700 text-xs text-slate-300 rounded-lg px-3 py-1.5 focus:outline-none focus:border-blue-500 max-w-[230px]">
                             </select>
                         </div>
                     </div>
@@ -480,26 +485,99 @@ htmlTemplate = """<!DOCTYPE html>
             }
         }
 
-        function buildGroupedTimeOptions(timestamps) {
-            if (!timestamps || timestamps.length === 0) return '';
+        const RACE_SCHEDULE_HV = {
+            1: "19:10", 2: "19:40", 3: "20:10", 4: "20:40",
+            5: "21:10", 6: "21:45", 7: "22:15", 8: "22:50", 9: "23:20"
+        };
+        const RACE_SCHEDULE_ST = {
+            1: "13:00", 2: "13:30", 3: "14:00", 4: "14:30", 5: "15:00",
+            6: "15:35", 7: "16:05", 8: "16:40", 9: "17:15", 10: "17:50", 11: "18:25"
+        };
+
+        function formatDateLabel(dateStr, timestamps) {
+            if (dateStr === '2026-09-16') return `${dateStr} (谷草夜賽 · 8場全量)`;
+            if (dateStr === '2026-09-06') return `${dateStr} (沙田日賽 · 開鑼日)`;
+            if (dateStr === '2022-09-18') return `${dateStr} (歷史大戶庫)`;
+            const hasNight = (timestamps || []).some(t => t.startsWith(dateStr) && parseInt((t.split(' ')[1]||'').split(':')[0], 10) >= 18);
+            const label = hasNight ? '谷草夜賽' : '沙田日賽/早盤';
+            return `${dateStr} (${label})`;
+        }
+
+        function getRacePostTime(raceNo, dateStr, timestampsForDate) {
+            const hasNight = (timestampsForDate || []).some(t => {
+                const hour = parseInt((t.split(' ')[1] || '').split(':')[0], 10);
+                return hour >= 18;
+            });
+            const schedule = hasNight ? RACE_SCHEDULE_HV : RACE_SCHEDULE_ST;
+            const timeStr = schedule[raceNo] || (hasNight ? '20:00' : '14:00');
+            return `${dateStr} ${timeStr}:00`;
+        }
+
+        function findClosestTimestamp(targetMs, timestamps) {
+            if (!timestamps || timestamps.length === 0) return null;
+            let bestTs = timestamps[0];
+            let minDiff = Infinity;
+            for (const ts of timestamps) {
+                const tsMs = new Date(ts.replace(/-/g, '/')).getTime();
+                const diff = Math.abs(tsMs - targetMs);
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    bestTs = ts;
+                }
+            }
+            return bestTs;
+        }
+
+        function buildGroupedTimeOptions(timestamps, selectedDate, selectedRaceNo) {
+            if (!timestamps || timestamps.length === 0) return '<option value="">(無切片記錄)</option>';
+            const filtered = selectedDate ? timestamps.filter(t => t.startsWith(selectedDate)) : timestamps;
+            if (filtered.length === 0) return '<option value="">(當前日期暫無切片)</option>';
+
+            const postTimeStr = selectedDate && selectedRaceNo ? getRacePostTime(selectedRaceNo, selectedDate, filtered) : null;
+            const postTimeMs = postTimeStr ? new Date(postTimeStr.replace(/-/g, '/')).getTime() : null;
+
+            let anchorPost = null;
+            let anchor5m = null;
+            let anchor15m = null;
+            let anchor30m = null;
+            const earliestOfDay = filtered[filtered.length - 1];
+            const latestOfDay = filtered[0];
+
+            if (postTimeMs) {
+                anchorPost = findClosestTimestamp(postTimeMs, filtered);
+                anchor5m = findClosestTimestamp(postTimeMs - 5 * 60 * 1000, filtered);
+                anchor15m = findClosestTimestamp(postTimeMs - 15 * 60 * 1000, filtered);
+                anchor30m = findClosestTimestamp(postTimeMs - 30 * 60 * 1000, filtered);
+            }
+
             const groups = {
                 settle: { label: '🏁 終盤收官 / 即時最新切片', items: [] },
-                inplay: { label: '🔴 臨場戰時高頻時段 (18:00 - 23:00)', items: [] },
+                inplay: { label: '🔴 臨場戰時高頻時段 (18:00 - 23:59)', items: [] },
                 early: { label: '🟡 賽事日早盤時段 (10:00 - 18:00)', items: [] },
-                history: { label: '⚪ 早盤開盤基准 / 歷史切片', items: [] }
+                history: { label: '⚪ 歷史切片 / 隔日初盤', items: [] }
             };
 
-            timestamps.forEach((ts, idx) => {
+            filtered.forEach((ts, idx) => {
                 const timePart = ts.split(' ')[1] || '';
                 const hour = parseInt(timePart.split(':')[0], 10);
-                let suffix = '';
-                if (idx === 0) suffix = ' 🔥 (最新)';
-                else if (idx === timestamps.length - 1) suffix = ' 📍 (開盤初盤)';
+                let badge = '';
 
-                const item = { val: ts, text: `${ts}${suffix}` };
+                if (selectedRaceNo && postTimeMs) {
+                    if (ts === anchorPost) badge = ` 🏁 [第${selectedRaceNo}場 開跑終盤]`;
+                    else if (ts === anchor5m) badge = ` ⚡ [第${selectedRaceNo}場 臨場5分]`;
+                    else if (ts === anchor15m) badge = ` 🚨 [第${selectedRaceNo}場 大戶15分]`;
+                    else if (ts === anchor30m) badge = ` ⏱️ [第${selectedRaceNo}場 賽前30分]`;
+                }
+
+                if (!badge) {
+                    if (ts === latestOfDay) badge = ' 🔥 (最新)';
+                    else if (ts === earliestOfDay) badge = ' 📍 (早盤基準)';
+                }
+
+                const item = { val: ts, text: `${ts}${badge}` };
                 if (idx === 0 || (ts.includes('23:') && idx < 5)) {
                     groups.settle.items.push(item);
-                } else if (hour >= 18 && hour < 23) {
+                } else if (hour >= 18 && hour <= 23) {
                     groups.inplay.items.push(item);
                 } else if (hour >= 10 && hour < 18) {
                     groups.early.items.push(item);
@@ -520,9 +598,76 @@ htmlTemplate = """<!DOCTYPE html>
             return html;
         }
 
+        function populateDateSelector(timestamps) {
+            const dateSelect = document.getElementById('compDateSelect');
+            if (!dateSelect) return;
+            const dates = Array.from(new Set((timestamps || []).map(t => t.split(' ')[0]))).filter(Boolean);
+            dates.sort((a, b) => b.localeCompare(a));
+            
+            dateSelect.innerHTML = dates.map(d => `<option value="${d}">${formatDateLabel(d, timestamps)}</option>`).join('');
+            if (dates.includes('2026-09-16')) {
+                dateSelect.value = '2026-09-16';
+            } else if (dates.length > 0) {
+                dateSelect.value = dates[0];
+            }
+        }
+
+        function updateTimeSelectors(selectedDate, selectedRaceNo, preserveSelection = false) {
+            const t1Select = document.getElementById('compTime1');
+            const t2Select = document.getElementById('compTime2');
+            const matrixTimeSelect = document.getElementById('matrixTime');
+            if (!t1Select || !t2Select) return;
+
+            const curT1 = t1Select.value;
+            const curT2 = t2Select.value;
+            const filtered = selectedDate ? allTimestamps.filter(t => t.startsWith(selectedDate)) : allTimestamps;
+            const groupedHtml = buildGroupedTimeOptions(allTimestamps, selectedDate, selectedRaceNo);
+
+            t1Select.innerHTML = groupedHtml;
+            t2Select.innerHTML = groupedHtml;
+            if (matrixTimeSelect) {
+                matrixTimeSelect.innerHTML = groupedHtml;
+            }
+
+            if (preserveSelection && filtered.includes(curT1) && filtered.includes(curT2)) {
+                t1Select.value = curT1;
+                t2Select.value = curT2;
+            } else if (filtered.length > 0) {
+                t2Select.value = filtered[0];
+                t1Select.value = filtered.length > 1 ? filtered[1] : filtered[0];
+                if (matrixTimeSelect) {
+                    matrixTimeSelect.value = filtered[0];
+                }
+            }
+        }
+
+        function onDateChange() {
+            const selectedDate = document.getElementById('compDateSelect').value;
+            const selectedRaceNo = parseInt(document.getElementById('compRaceNo').value, 10) || 1;
+            updateTimeSelectors(selectedDate, selectedRaceNo, false);
+            loadCompareData();
+            if (!document.getElementById('matrixTab').classList.contains('hidden')) {
+                loadMatrixData();
+            }
+        }
+
+        function onRaceChange() {
+            const selectedDate = document.getElementById('compDateSelect').value;
+            const selectedRaceNo = parseInt(document.getElementById('compRaceNo').value, 10) || 1;
+            updateTimeSelectors(selectedDate, selectedRaceNo, true);
+            loadCompareData();
+            if (!document.getElementById('matrixTab').classList.contains('hidden')) {
+                loadMatrixData();
+            }
+        }
+
         function applyTacticPreset(presetType) {
             if (!allTimestamps || allTimestamps.length === 0) return;
-            const latest = allTimestamps[0];
+            const selectedDate = document.getElementById('compDateSelect') ? document.getElementById('compDateSelect').value : '';
+            const selectedRaceNo = parseInt(document.getElementById('compRaceNo').value, 10) || 1;
+            const filtered = selectedDate ? allTimestamps.filter(t => t.startsWith(selectedDate)) : allTimestamps;
+            if (filtered.length === 0) return;
+
             const t1Select = document.getElementById('compTime1');
             const t2Select = document.getElementById('compTime2');
 
@@ -530,32 +675,41 @@ htmlTemplate = """<!DOCTYPE html>
                 btn.classList.remove('ring-2', 'ring-emerald-400', 'bg-emerald-900/60');
             });
 
-            if (presetType === '5min' || presetType === '15min') {
-                const diffMins = presetType === '5min' ? 5 : 15;
-                const latestMs = new Date(latest.replace(/-/g, '/')).getTime();
-                const targetMs = latestMs - diffMins * 60 * 1000;
+            const postTimeStr = getRacePostTime(selectedRaceNo, selectedDate, filtered);
+            const postTimeMs = new Date(postTimeStr.replace(/-/g, '/')).getTime();
+            const latestOfDayMs = new Date(filtered[0].replace(/-/g, '/')).getTime();
+            const isHistoricalRace = latestOfDayMs > postTimeMs + 5 * 60 * 1000;
 
-                let bestTs = allTimestamps[1] || latest;
-                let minDiff = Infinity;
-                for (const ts of allTimestamps) {
-                    const tsMs = new Date(ts.replace(/-/g, '/')).getTime();
-                    const diff = Math.abs(tsMs - targetMs);
-                    if (diff < minDiff) {
-                        minDiff = diff;
-                        bestTs = ts;
-                    }
+            if (presetType === '5min') {
+                if (isHistoricalRace) {
+                    t2Select.value = findClosestTimestamp(postTimeMs - 2 * 60 * 1000, filtered);
+                    t1Select.value = findClosestTimestamp(postTimeMs - 7 * 60 * 1000, filtered);
+                } else {
+                    t2Select.value = filtered[0];
+                    t1Select.value = findClosestTimestamp(latestOfDayMs - 5 * 60 * 1000, filtered);
                 }
-                t2Select.value = latest;
-                t1Select.value = bestTs;
+            } else if (presetType === '15min') {
+                if (isHistoricalRace) {
+                    t2Select.value = findClosestTimestamp(postTimeMs - 2 * 60 * 1000, filtered);
+                    t1Select.value = findClosestTimestamp(postTimeMs - 17 * 60 * 1000, filtered);
+                } else {
+                    t2Select.value = filtered[0];
+                    t1Select.value = findClosestTimestamp(latestOfDayMs - 15 * 60 * 1000, filtered);
+                }
             } else if (presetType === 'early') {
-                const dayStr = latest.split(' ')[0];
-                const sameDay = allTimestamps.filter(t => t.startsWith(dayStr));
-                const earliest = sameDay.length > 0 ? sameDay[sameDay.length - 1] : allTimestamps[allTimestamps.length - 1];
-                t2Select.value = latest;
-                t1Select.value = earliest;
+                if (isHistoricalRace) {
+                    t2Select.value = findClosestTimestamp(postTimeMs - 2 * 60 * 1000, filtered);
+                } else {
+                    t2Select.value = filtered[0];
+                }
+                t1Select.value = filtered[filtered.length - 1];
             } else if (presetType === 'settle') {
-                t2Select.value = allTimestamps[0];
-                t1Select.value = allTimestamps[allTimestamps.length - 1];
+                if (isHistoricalRace) {
+                    t2Select.value = findClosestTimestamp(postTimeMs, filtered);
+                } else {
+                    t2Select.value = filtered[0];
+                }
+                t1Select.value = filtered[filtered.length - 1];
             }
 
             if (window.event && window.event.currentTarget) {
@@ -570,23 +724,11 @@ htmlTemplate = """<!DOCTYPE html>
                 const tsRes = await fetch('/api/timestamps');
                 allTimestamps = await tsRes.json();
                 
-                const t1Select = document.getElementById('compTime1');
-                const t2Select = document.getElementById('compTime2');
-                const matrixTimeSelect = document.getElementById('matrixTime');
-                
                 if (allTimestamps.length > 0) {
-                    const groupedHtml = buildGroupedTimeOptions(allTimestamps);
-                    t1Select.innerHTML = groupedHtml;
-                    t2Select.innerHTML = groupedHtml;
-                    if (matrixTimeSelect) {
-                        matrixTimeSelect.innerHTML = groupedHtml;
-                        matrixTimeSelect.value = allTimestamps[0];
-                    }
-                    
-                    const late = allTimestamps[0];
-                    const early = allTimestamps.length > 1 ? allTimestamps[1] : allTimestamps[0];
-                    t1Select.value = early;
-                    t2Select.value = late;
+                    populateDateSelector(allTimestamps);
+                    const selectedDate = document.getElementById('compDateSelect').value;
+                    const selectedRaceNo = parseInt(document.getElementById('compRaceNo').value, 10) || 1;
+                    updateTimeSelectors(selectedDate, selectedRaceNo, false);
                 }
 
                 await loadCompareData();
@@ -887,21 +1029,9 @@ htmlTemplate = """<!DOCTYPE html>
                     if (lastSeenTimestamp && latest !== lastSeenTimestamp) {
                         console.log("[AutoRefresh] 偵測到新盤口時間戳:", latest);
                         allTimestamps = tsList;
-                        const t1Select = document.getElementById('compTime1');
-                        const t2Select = document.getElementById('compTime2');
-                        const matrixTimeSelect = document.getElementById('matrixTime');
-
-                        const prevT1 = t1Select.value;
-                        const groupedHtml = buildGroupedTimeOptions(allTimestamps);
-                        t1Select.innerHTML = groupedHtml;
-                        t2Select.innerHTML = groupedHtml;
-                        t1Select.value = prevT1;
-                        t2Select.value = latest;
-
-                        if (matrixTimeSelect) {
-                            matrixTimeSelect.innerHTML = groupedHtml;
-                            matrixTimeSelect.value = latest;
-                        }
+                        const selectedDate = document.getElementById('compDateSelect') ? document.getElementById('compDateSelect').value : '';
+                        const selectedRaceNo = parseInt(document.getElementById('compRaceNo').value, 10) || 1;
+                        updateTimeSelectors(selectedDate, selectedRaceNo, true);
 
                         await loadCompareData();
                         if (!document.getElementById('matrixTab').classList.contains('hidden')) {
@@ -1010,7 +1140,7 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
 
 def runServer():
     startBackgroundWorkers()
-    http.server.ThreadingHTTPServer.allow_reuse_address = True
+    http.server.ThreadingHTTPServer.allow_reuse_address = False
     with http.server.ThreadingHTTPServer(("", portNumber), CustomHandler) as httpd:
         print(f"=== hsjc 2.0 Cloud Web Service Active on Port {portNumber} ===")
         httpd.serve_forever()
