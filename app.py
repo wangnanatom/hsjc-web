@@ -15,10 +15,10 @@ from scraperWorker import startBackgroundWorkers, getScraperStatus, updateScrape
 
 baseDir = os.path.dirname(os.path.abspath(__file__))
 dbPath = os.path.join(baseDir, "hsjc.db")
-portNumber = int(os.environ.get("PORT", 5000))
+portNumber = int(os.environ.get("PORT", 5050))
 
 def getDbConnection():
-    conn = sqlite3.connect(dbPath)
+    conn = sqlite3.connect(dbPath, timeout=15.0)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -27,7 +27,7 @@ def queryDistinctTimestamps():
     try:
         conn = getDbConnection()
         cursor = conn.cursor()
-        cursor.execute("SELECT DISTINCT CollectionDateTime FROM win ORDER BY CollectionDateTime DESC LIMIT 30;")
+        cursor.execute("SELECT DISTINCT CollectionDateTime FROM win ORDER BY CollectionDateTime DESC LIMIT 250;")
         rows = cursor.fetchall()
         timestamps = [r[0] for r in rows if r[0]]
         conn.close()
@@ -215,6 +215,26 @@ htmlTemplate = """<!DOCTYPE html>
                     <div id="liveStatusBadge" class="text-xs bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 px-3 py-1 rounded-full flex items-center shadow-sm">
                         <span class="w-2 h-2 bg-emerald-400 rounded-full animate-pulse mr-2"></span>
                         🟢 實盤全自動同步中 · 15秒輪詢
+                    </div>
+                </div>
+                <div class="flex flex-wrap items-center justify-between gap-3 mt-3 pt-3 border-t border-slate-800/80">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <span class="text-xs font-bold text-slate-400 mr-1 flex items-center">
+                            <svg class="w-3.5 h-3.5 text-amber-400 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                            戰術快捷比對:
+                        </span>
+                        <button type="button" onclick="applyTacticPreset('5min')" class="preset-btn px-2.5 py-1 bg-slate-800 hover:bg-emerald-950/60 hover:border-emerald-500/50 border border-slate-700 rounded-lg text-xs font-bold text-emerald-400 transition shadow-sm flex items-center">
+                            🔥 5分鐘衝刺 (最新 vs 5分前)
+                        </button>
+                        <button type="button" onclick="applyTacticPreset('15min')" class="preset-btn px-2.5 py-1 bg-slate-800 hover:bg-emerald-950/60 hover:border-emerald-500/50 border border-slate-700 rounded-lg text-xs font-bold text-emerald-400 transition shadow-sm flex items-center">
+                            🚨 15分鐘大戶入場 (最新 vs 15分前)
+                        </button>
+                        <button type="button" onclick="applyTacticPreset('early')" class="preset-btn px-2.5 py-1 bg-slate-800 hover:bg-blue-950/60 hover:border-blue-500/50 border border-slate-700 rounded-lg text-xs font-bold text-blue-400 transition shadow-sm flex items-center">
+                            📊 今日全盤走勢 (最新 vs 今日早盤)
+                        </button>
+                        <button type="button" onclick="applyTacticPreset('settle')" class="preset-btn px-2.5 py-1 bg-slate-800 hover:bg-purple-950/60 hover:border-purple-500/50 border border-slate-700 rounded-lg text-xs font-bold text-purple-300 transition shadow-sm flex items-center">
+                            🏁 終盤收官復盤 (封盤終點 vs 開盤初盤)
+                        </button>
                     </div>
                 </div>
                 <div class="flex flex-wrap items-center justify-between gap-4 mt-3 pt-3 border-t border-slate-800/80">
@@ -460,6 +480,91 @@ htmlTemplate = """<!DOCTYPE html>
             }
         }
 
+        function buildGroupedTimeOptions(timestamps) {
+            if (!timestamps || timestamps.length === 0) return '';
+            const groups = {
+                settle: { label: '🏁 終盤收官 / 即時最新切片', items: [] },
+                inplay: { label: '🔴 臨場戰時高頻時段 (18:00 - 23:00)', items: [] },
+                early: { label: '🟡 賽事日早盤時段 (10:00 - 18:00)', items: [] },
+                history: { label: '⚪ 早盤開盤基准 / 歷史切片', items: [] }
+            };
+
+            timestamps.forEach((ts, idx) => {
+                const timePart = ts.split(' ')[1] || '';
+                const hour = parseInt(timePart.split(':')[0], 10);
+                let suffix = '';
+                if (idx === 0) suffix = ' 🔥 (最新)';
+                else if (idx === timestamps.length - 1) suffix = ' 📍 (開盤初盤)';
+
+                const item = { val: ts, text: `${ts}${suffix}` };
+                if (idx === 0 || (ts.includes('23:') && idx < 5)) {
+                    groups.settle.items.push(item);
+                } else if (hour >= 18 && hour < 23) {
+                    groups.inplay.items.push(item);
+                } else if (hour >= 10 && hour < 18) {
+                    groups.early.items.push(item);
+                } else {
+                    groups.history.items.push(item);
+                }
+            });
+
+            let html = '';
+            for (const key of ['settle', 'inplay', 'early', 'history']) {
+                const g = groups[key];
+                if (g.items.length > 0) {
+                    html += `<optgroup label="${g.label}">`;
+                    html += g.items.map(it => `<option value="${it.val}">${it.text}</option>`).join('');
+                    html += `</optgroup>`;
+                }
+            }
+            return html;
+        }
+
+        function applyTacticPreset(presetType) {
+            if (!allTimestamps || allTimestamps.length === 0) return;
+            const latest = allTimestamps[0];
+            const t1Select = document.getElementById('compTime1');
+            const t2Select = document.getElementById('compTime2');
+
+            document.querySelectorAll('.preset-btn').forEach(btn => {
+                btn.classList.remove('ring-2', 'ring-emerald-400', 'bg-emerald-900/60');
+            });
+
+            if (presetType === '5min' || presetType === '15min') {
+                const diffMins = presetType === '5min' ? 5 : 15;
+                const latestMs = new Date(latest.replace(/-/g, '/')).getTime();
+                const targetMs = latestMs - diffMins * 60 * 1000;
+
+                let bestTs = allTimestamps[1] || latest;
+                let minDiff = Infinity;
+                for (const ts of allTimestamps) {
+                    const tsMs = new Date(ts.replace(/-/g, '/')).getTime();
+                    const diff = Math.abs(tsMs - targetMs);
+                    if (diff < minDiff) {
+                        minDiff = diff;
+                        bestTs = ts;
+                    }
+                }
+                t2Select.value = latest;
+                t1Select.value = bestTs;
+            } else if (presetType === 'early') {
+                const dayStr = latest.split(' ')[0];
+                const sameDay = allTimestamps.filter(t => t.startsWith(dayStr));
+                const earliest = sameDay.length > 0 ? sameDay[sameDay.length - 1] : allTimestamps[allTimestamps.length - 1];
+                t2Select.value = latest;
+                t1Select.value = earliest;
+            } else if (presetType === 'settle') {
+                t2Select.value = allTimestamps[0];
+                t1Select.value = allTimestamps[allTimestamps.length - 1];
+            }
+
+            if (window.event && window.event.currentTarget) {
+                window.event.currentTarget.classList.add('ring-2', 'ring-emerald-400', 'bg-emerald-900/60');
+            }
+
+            loadCompareData();
+        }
+
         async function initPage() {
             try {
                 const tsRes = await fetch('/api/timestamps');
@@ -470,10 +575,11 @@ htmlTemplate = """<!DOCTYPE html>
                 const matrixTimeSelect = document.getElementById('matrixTime');
                 
                 if (allTimestamps.length > 0) {
-                    t1Select.innerHTML = allTimestamps.map(t => `<option value="${t}">${t}</option>`).join('');
-                    t2Select.innerHTML = allTimestamps.map(t => `<option value="${t}">${t}</option>`).join('');
+                    const groupedHtml = buildGroupedTimeOptions(allTimestamps);
+                    t1Select.innerHTML = groupedHtml;
+                    t2Select.innerHTML = groupedHtml;
                     if (matrixTimeSelect) {
-                        matrixTimeSelect.innerHTML = allTimestamps.map(t => `<option value="${t}">${t}</option>`).join('');
+                        matrixTimeSelect.innerHTML = groupedHtml;
                         matrixTimeSelect.value = allTimestamps[0];
                     }
                     
@@ -786,13 +892,14 @@ htmlTemplate = """<!DOCTYPE html>
                         const matrixTimeSelect = document.getElementById('matrixTime');
 
                         const prevT1 = t1Select.value;
-                        t1Select.innerHTML = allTimestamps.map(t => `<option value="${t}">${t}</option>`).join('');
-                        t2Select.innerHTML = allTimestamps.map(t => `<option value="${t}">${t}</option>`).join('');
+                        const groupedHtml = buildGroupedTimeOptions(allTimestamps);
+                        t1Select.innerHTML = groupedHtml;
+                        t2Select.innerHTML = groupedHtml;
                         t1Select.value = prevT1;
                         t2Select.value = latest;
 
                         if (matrixTimeSelect) {
-                            matrixTimeSelect.innerHTML = allTimestamps.map(t => `<option value="${t}">${t}</option>`).join('');
+                            matrixTimeSelect.innerHTML = groupedHtml;
                             matrixTimeSelect.value = latest;
                         }
 
@@ -844,54 +951,62 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(encoded)
 
     def do_GET(self):
-        parsedUrl = urllib.parse.urlparse(self.path)
-        path = parsedUrl.path
-        queryParams = urllib.parse.parse_qs(parsedUrl.query)
-        
-        if path == "/" or path == "/index.html":
-            self.sendHtmlResponse(htmlTemplate)
-        elif path == "/health":
-            self.sendHtmlResponse("OK")
-        elif path == "/api/timestamps":
-            data = queryDistinctTimestamps()
-            self.sendJsonResponse(data)
-        elif path == "/api/compare":
-            pool = queryParams.get("pool", ["WIN"])[0]
-            raceNo = int(queryParams.get("raceNo", [1])[0])
-            time1 = queryParams.get("time1", [None])[0]
-            time2 = queryParams.get("time2", [None])[0]
-            data = queryCompareData(pool, raceNo, time1, time2)
-            self.sendJsonResponse(data)
-        elif path == "/api/matrix":
-            pool = queryParams.get("pool", ["QIN"])[0]
-            raceNo = int(queryParams.get("raceNo", [1])[0])
-            timeStr = queryParams.get("time", [None])[0]
-            data = queryMatrixData(pool, raceNo, timeStr)
-            self.sendJsonResponse(data)
-        elif path == "/api/results":
-            data = querySeasonResults()
-            self.sendJsonResponse(data)
-        elif path == "/api/racecards":
-            data = queryRaceCards()
-            self.sendJsonResponse(data)
-        elif path == "/api/scraper/status":
-            self.sendJsonResponse(getScraperStatus())
-        elif path == "/api/scraper/config":
-            mode = queryParams.get("mode", [None])[0]
-            interval = queryParams.get("interval", [None])[0]
-            enabled = queryParams.get("enabled", [None])[0]
-            targetDate = queryParams.get("targetDate", [None])[0]
-            targetVenue = queryParams.get("targetVenue", [None])[0]
-            if enabled is not None:
-                enabled = enabled.lower() in ["1", "true", "yes"]
-            updated = updateScraperConfig(mode, interval, enabled, targetDate, targetVenue)
-            self.sendJsonResponse(updated)
-        elif path == "/api/scraper/trigger":
-            runScraperCycle()
-            self.sendJsonResponse(getScraperStatus())
-        else:
-            self.send_response(404)
-            self.end_headers()
+        try:
+            parsedUrl = urllib.parse.urlparse(self.path)
+            path = parsedUrl.path
+            queryParams = urllib.parse.parse_qs(parsedUrl.query)
+            
+            if path == "/" or path == "/index.html":
+                self.sendHtmlResponse(htmlTemplate)
+            elif path == "/health":
+                self.sendHtmlResponse("OK")
+            elif path == "/api/timestamps":
+                data = queryDistinctTimestamps()
+                self.sendJsonResponse(data)
+            elif path == "/api/compare":
+                pool = queryParams.get("pool", ["WIN"])[0]
+                raceNo = int(queryParams.get("raceNo", [1])[0])
+                time1 = queryParams.get("time1", [None])[0]
+                time2 = queryParams.get("time2", [None])[0]
+                data = queryCompareData(pool, raceNo, time1, time2)
+                self.sendJsonResponse(data)
+            elif path == "/api/matrix":
+                pool = queryParams.get("pool", ["QIN"])[0]
+                raceNo = int(queryParams.get("raceNo", [1])[0])
+                timeStr = queryParams.get("time", [None])[0]
+                data = queryMatrixData(pool, raceNo, timeStr)
+                self.sendJsonResponse(data)
+            elif path == "/api/results":
+                data = querySeasonResults()
+                self.sendJsonResponse(data)
+            elif path == "/api/racecards":
+                data = queryRaceCards()
+                self.sendJsonResponse(data)
+            elif path == "/api/scraper/status":
+                self.sendJsonResponse(getScraperStatus())
+            elif path == "/api/scraper/config":
+                mode = queryParams.get("mode", [None])[0]
+                interval = queryParams.get("interval", [None])[0]
+                enabled = queryParams.get("enabled", [None])[0]
+                targetDate = queryParams.get("targetDate", [None])[0]
+                targetVenue = queryParams.get("targetVenue", [None])[0]
+                if enabled is not None:
+                    enabled = enabled.lower() in ["1", "true", "yes"]
+                updated = updateScraperConfig(mode, interval, enabled, targetDate, targetVenue)
+                self.sendJsonResponse(updated)
+            elif path == "/api/scraper/trigger":
+                runScraperCycle()
+                self.sendJsonResponse(getScraperStatus())
+            else:
+                self.send_response(404)
+                self.end_headers()
+        except Exception as err:
+            print(f"[HTTP Error] Error handling GET {self.path}: {err}")
+            try:
+                self.send_response(500)
+                self.end_headers()
+            except Exception:
+                pass
 
 def runServer():
     startBackgroundWorkers()
