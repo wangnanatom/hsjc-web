@@ -35,12 +35,12 @@ def fetchHtml(url):
 def extractMeetingMeta(soup):
     """提取赛期、场地、头场开跑时间等元数据"""
     meta = {
-        "raceDate": "2026/09/16",
-        "racecourse": "HV",
-        "venueName": "跑馬地",
-        "meetingType": "夜賽",
-        "firstRaceTime": "19:10",
-        "totalRaces": 8
+        "raceDate": None,
+        "racecourse": "ST",
+        "venueName": "沙田",
+        "meetingType": "日賽",
+        "firstRaceTime": "13:00",
+        "totalRaces": 10
     }
 
     # 寻找开跑时间与赛地文本，例如：2026年9月16日, 星期三, 跑馬地, 19:10
@@ -146,14 +146,17 @@ def scrapeAllRaceCards():
 
     meta["totalHorses"] = len(allHorses)
 
-    # 3. 写入文件
-    with open(racecardsFile, "w", encoding="utf-8") as f:
-        json.dump(allHorses, f, ensure_ascii=False, indent=2)
-    print(f"[Crawler] Successfully wrote {len(allHorses)} horses to {racecardsFile}")
+    # 3. 仅当解析到真实有效马匹数据且赛期有效时写入文件，防止覆盖有效历史缓存
+    if len(allHorses) > 0 and meta.get("raceDate"):
+        with open(racecardsFile, "w", encoding="utf-8") as f:
+            json.dump(allHorses, f, ensure_ascii=False, indent=2)
+        print(f"[Crawler] Successfully wrote {len(allHorses)} horses to {racecardsFile}")
 
-    with open(metaFile, "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-    print(f"[Crawler] Successfully wrote meeting metadata to {metaFile}")
+        with open(metaFile, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        print(f"[Crawler] Successfully wrote meeting metadata to {metaFile}")
+    else:
+        print(f"[Crawler] 未解析到新的有效出赛表（马匹数: {len(allHorses)}），保留现有缓存数据。")
 
     return meta, allHorses
 

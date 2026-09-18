@@ -50,7 +50,10 @@ def initSqliteWalMode():
 
 def detectNextMeeting():
     """自动嗅探或读取即将举行的赛期与场地"""
-    # 1. 优先读取由 fetchRaceCards 生成的 race_meta.json
+    now = getHkTime()
+    todayStr = now.strftime("%Y-%m-%d")
+
+    # 1. 优先读取由 fetchRaceCards 生成的 race_meta.json (必须未过期)
     metaPath = os.path.join(baseDir, "data", "race_meta.json")
     if os.path.exists(metaPath):
         try:
@@ -60,12 +63,12 @@ def detectNextMeeting():
                 venue = meta.get("racecourse", "HV")
                 vName = meta.get("venueName", "跑馬地")
                 rTime = meta.get("firstRaceTime", "19:10")
-                if rDate:
+                if rDate and rDate >= todayStr:
                     return rDate, venue, vName, rTime
         except Exception:
             pass
 
-    # 2. 从 racecards.json 提取
+    # 2. 从 racecards.json 提取 (必须未过期)
     cardsPath = os.path.join(baseDir, "data", "racecards.json")
     if os.path.exists(cardsPath):
         try:
@@ -75,22 +78,25 @@ def detectNextMeeting():
                     rDate = cards[0].get("raceDate", "").replace("/", "-")
                     venue = cards[0].get("racecourse", "HV")
                     vName = "跑馬地" if venue == "HV" else "沙田"
-                    return rDate, venue, vName, "19:10" if venue == "HV" else "13:00"
+                    if rDate and rDate >= todayStr:
+                        return rDate, venue, vName, "19:10" if venue == "HV" else "13:00"
         except Exception:
             pass
 
-    # 3. 智能按周推算默认值 (周三 HV, 周末 ST)
-    now = getHkTime()
+    # 3. 智能按周推算默认赛期 (周三 HV 夜赛, 周末 ST 日赛)
     weekday = now.weekday()
-    if weekday == 2: # 周三
+    if weekday == 2: # 周三比赛日当天
         return now.strftime("%Y-%m-%d"), "HV", "跑馬地", "19:10"
-    elif weekday in [5, 6]: # 周六或周日
+    elif weekday == 6: # 周日比赛日当天
         return now.strftime("%Y-%m-%d"), "ST", "沙田", "13:00"
-    elif weekday < 2: # 周一/周二 -> 即将到来的周三
+    elif weekday == 5: # 周六早盘日 -> 锁定明日(周日)沙田赛事
+        nextSun = now + timedelta(days=1)
+        return nextSun.strftime("%Y-%m-%d"), "ST", "沙田", "13:00"
+    elif weekday < 2: # 周一/周二 -> 锁定本周三夜赛
         daysAhead = 2 - weekday
         nextWed = now + timedelta(days=daysAhead)
         return nextWed.strftime("%Y-%m-%d"), "HV", "跑馬地", "19:10"
-    else: # 周四/周五 -> 即将到来的周日
+    else: # 周四/周五 -> 锁定本周末周日日赛
         daysAhead = 6 - weekday
         nextSun = now + timedelta(days=daysAhead)
         return nextSun.strftime("%Y-%m-%d"), "ST", "沙田", "13:00"
@@ -127,7 +133,11 @@ def calculateDynamicInterval():
     if isTargetToday and ((targetVenue == "HV" and 9 <= hour < 18) or (targetVenue == "ST" and 9 <= hour < 12)):
         return 120 # 早盘 2 分钟
 
-    # 4. 非赛马日 / 赛前待命（每 30 分钟检查一次）
+    # 4. 赛前一日中午早盘初盘窗口 (11:45 - 13:15): 自动加速到 60 秒轮询，精准捕获 12:00 初盘数据
+    if 11 <= hour <= 13:
+        return 60
+
+    # 5. 非赛马日常规待命（每 30 分钟检查一次）
     return 1800
 
 import gzip
