@@ -4,6 +4,8 @@ import json
 import sqlite3
 import os
 import sys
+import threading
+from collections import deque
 import urllib.parse
 from datetime import datetime
 
@@ -16,7 +18,191 @@ import dbAdapter
 
 baseDir = os.path.dirname(os.path.abspath(__file__))
 dbPath = os.path.join(baseDir, "hsjc.db")
+visitorLogPath = os.path.join(baseDir, "data", "visitor_analytics.json")
 portNumber = int(os.environ.get("PORT", 5050))
+
+class VisitorTracker:
+    def __init__(self, dataFilePath=None):
+        self.lock = threading.Lock()
+        self.dataFilePath = dataFilePath
+        self.sessions = {}
+        self.logs = deque(maxlen=500)
+        self.todayDate = datetime.now().strftime("%Y-%m-%d")
+        self.loadFromFile()
+
+    def loadFromFile(self):
+        if self.dataFilePath and os.path.exists(self.dataFilePath):
+            try:
+                with open(self.dataFilePath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.sessions = data.get("sessions", {})
+                    for ip, s in self.sessions.items():
+                        try:
+                            s["lastSeenDt"] = datetime.strptime(s["lastSeen"], "%Y-%m-%d %H:%M:%S")
+                        except Exception:
+                            s["lastSeenDt"] = datetime.now()
+                    rawLogs = data.get("logs", [])
+                    self.logs = deque(rawLogs[:500], maxlen=500)
+            except Exception as e:
+                print("[VisitorTracker] 加載歷史訪客日誌異常:", e)
+
+    def saveToFile(self):
+        if not self.dataFilePath:
+            return
+        try:
+            serializableSessions = {}
+            for ip, s in self.sessions.items():
+                copyS = dict(s)
+                copyS.pop("lastSeenDt", None)
+                serializableSessions[ip] = copyS
+            payload = {
+                "sessions": serializableSessions,
+                "logs": list(self.logs)[:200]
+            }
+            tmpPath = self.dataFilePath + ".tmp"
+            with open(tmpPath, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            if os.path.exists(self.dataFilePath):
+                os.remove(self.dataFilePath)
+            os.rename(tmpPath, self.dataFilePath)
+        except Exception:
+            pass
+
+    def parseDevice(self, userAgent):
+        ua = (userAgent or "").lower()
+        if "iphone" in ua:
+            return "iPhone (iOS)"
+        elif "ipad" in ua:
+            return "iPad (iOS)"
+        elif "android" in ua:
+            return "Android 手機"
+        elif "windows" in ua:
+            return "Windows PC"
+        elif "macintosh" in ua or "mac os" in ua:
+            return "Mac 電腦"
+        elif "linux" in ua:
+            return "Linux 設備"
+        elif any(k in ua for k in ["curl", "python", "render", "uptime", "bot", "spider"]):
+            return "探針 / 爬蟲"
+        return "通用瀏覽器"
+
+    def recordVisit(self, clientIp, userAgent, path, queryParams):
+        if path in ["/health", "/favicon.ico", "/api/analytics/stats"]:
+            return
+
+        now = datetime.now()
+        nowStr = now.strftime("%Y-%m-%d %H:%M:%S")
+        todayStr = now.strftime("%Y-%m-%d")
+        device = self.parseDevice(userAgent)
+
+        action = ""
+        isBackgroundPoll = False
+        if path in ["/", "/index.html"]:
+            action = "打開戰術看板首頁"
+        elif path == "/api/compare":
+            pool = queryParams.get("pool", ["WIN"])[0]
+            raceNo = queryParams.get("raceNo", ["1"])[0]
+            action = f"雙時刻落飛比對 第{raceNo}場 [{pool}]"
+        elif path == "/api/matrix":
+            pool = queryParams.get("pool", ["QIN"])[0]
+            raceNo = queryParams.get("raceNo", ["1"])[0]
+            action = f"查閱2D組合矩陣 第{raceNo}場 [{pool}]"
+        elif path == "/api/results":
+            action = "查看賽事歷史復盤"
+        elif path == "/api/racecards":
+            action = "查看最新排位表"
+        elif path == "/api/timestamps":
+            isBackgroundPoll = True
+            action = "定時盤口同步"
+        elif path.startswith("/api/scraper"):
+            action = f"採集器控制: {path.replace('/api/scraper/', '')}"
+        else:
+            action = f"訪問 {path}"
+
+        with self.lock:
+            if clientIp not in self.sessions:
+                self.sessions[clientIp] = {
+                    "ip": clientIp,
+                    "device": device,
+                    "firstSeen": nowStr,
+                    "lastSeen": nowStr,
+                    "lastSeenDt": now,
+                    "hits": 1,
+                    "lastAction": action
+                }
+            else:
+                s = self.sessions[clientIp]
+                s["lastSeen"] = nowStr
+                s["lastSeenDt"] = now
+                s["hits"] = s.get("hits", 0) + 1
+                if not isBackgroundPoll or s.get("lastAction") == "定時盤口同步":
+                    s["lastAction"] = action
+                if s.get("device") in ["通用瀏覽器", "未知"] and device not in ["通用瀏覽器", "未知"]:
+                    s["device"] = device
+
+            if not isBackgroundPoll:
+                self.logs.appendleft({
+                    "timestamp": nowStr,
+                    "ip": clientIp,
+                    "device": device,
+                    "action": action,
+                    "path": path
+                })
+                self.saveToFile()
+
+    def getStats(self):
+        now = datetime.now()
+        nowStr = now.strftime("%Y-%m-%d %H:%M:%S")
+        todayStr = now.strftime("%Y-%m-%d")
+
+        with self.lock:
+            activeCount = 0
+            todayUvCount = 0
+            todayPvCount = 0
+            visitorList = []
+
+            for ip, s in self.sessions.items():
+                lastSeenDt = s.get("lastSeenDt")
+                if not isinstance(lastSeenDt, datetime):
+                    try:
+                        lastSeenDt = datetime.strptime(s.get("lastSeen", ""), "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        lastSeenDt = now
+                    s["lastSeenDt"] = lastSeenDt
+
+                diffSec = (now - lastSeenDt).total_seconds()
+                isActive = (diffSec <= 300)
+                if isActive:
+                    activeCount += 1
+
+                if s.get("lastSeen", "").startswith(todayStr):
+                    todayUvCount += 1
+                    todayPvCount += s.get("hits", 0)
+
+                visitorList.append({
+                    "ip": ip,
+                    "device": s.get("device", "未知"),
+                    "firstSeen": s.get("firstSeen", nowStr),
+                    "lastSeen": s.get("lastSeen", nowStr),
+                    "hits": s.get("hits", 0),
+                    "isActive": isActive,
+                    "lastAction": s.get("lastAction", "-")
+                })
+
+            visitorList.sort(key=lambda x: x["lastSeen"], reverse=True)
+            logList = list(self.logs)[:100]
+
+            return {
+                "serverTime": nowStr,
+                "activeUsersCount": activeCount,
+                "todayUniqueVisitors": todayUvCount,
+                "todayPageViews": todayPvCount,
+                "totalTrackedNodes": len(self.sessions),
+                "visitors": visitorList,
+                "recentLogs": logList
+            }
+
+visitorTracker = VisitorTracker(visitorLogPath)
 
 def queryDistinctTimestamps():
     try:
@@ -181,6 +367,10 @@ htmlTemplate = """<!DOCTYPE html>
                     <span id="dbStatusBadge" class="text-[11px] font-bold px-2 py-0.5 bg-slate-800 text-slate-400 border border-slate-700 rounded-full flex items-center">
                         <span class="w-1.5 h-1.5 bg-slate-500 rounded-full mr-1.5"></span>資料庫偵測中...
                     </span>
+                    <button onclick="openAnalyticsModal()" id="visitorStatsBadge" class="text-[11px] font-bold px-2.5 py-0.5 bg-indigo-950/80 text-indigo-300 border border-indigo-700/60 rounded-full flex items-center hover:bg-indigo-900 transition shadow-sm cursor-pointer" title="點擊查看訪客審計與在線監控">
+                        <span class="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-pulse mr-1.5"></span>
+                        <span id="visitorCountText">訪客: 載入中...</span>
+                    </button>
                 </div>
                 <p class="text-xs text-slate-400">香港職業賽馬大戶暗盤資金流向 · 2D 矩陣深度監控終端</p>
             </div>
@@ -439,8 +629,94 @@ htmlTemplate = """<!DOCTYPE html>
                     </table>
                 </div>
             </div>
-        </section>
     </main>
+
+    <!-- 訪客統計與訪問審計模態框 -->
+    <div id="analyticsModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] hidden flex items-center justify-center p-4">
+        <div class="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-4xl max-h-[88vh] flex flex-col shadow-2xl overflow-hidden">
+            <!-- 頂部標題 -->
+            <div class="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-950/80">
+                <div class="flex items-center space-x-3">
+                    <div class="w-9 h-9 rounded-xl bg-indigo-600/20 text-indigo-400 flex items-center justify-center font-bold text-lg">👥</div>
+                    <div>
+                        <h3 class="text-base font-bold text-white flex items-center gap-2">
+                            訪客審計與在線監控日誌
+                            <span class="text-xs font-normal text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded-full border border-emerald-800/60">實時監控</span>
+                        </h3>
+                        <p class="text-xs text-slate-400">已自動穿透雲端代理，精準識別訪客真實公網 IP、設備終端及看盤操作流水</p>
+                    </div>
+                </div>
+                <button onclick="closeAnalyticsModal()" class="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-slate-800 transition text-lg">✕</button>
+            </div>
+
+            <!-- 數據指標卡片 -->
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 p-4 bg-slate-950/40 border-b border-slate-800">
+                <div class="bg-slate-800/60 p-3 rounded-xl border border-slate-700/60">
+                    <div class="text-xs text-slate-400 font-medium">當前實時在線 (5分內)</div>
+                    <div id="statActiveUsers" class="text-2xl font-black text-emerald-400 mt-1">0</div>
+                </div>
+                <div class="bg-slate-800/60 p-3 rounded-xl border border-slate-700/60">
+                    <div class="text-xs text-slate-400 font-medium">今日獨立訪客 (UV)</div>
+                    <div id="statTodayUV" class="text-2xl font-black text-indigo-400 mt-1">0</div>
+                </div>
+                <div class="bg-slate-800/60 p-3 rounded-xl border border-slate-700/60">
+                    <div class="text-xs text-slate-400 font-medium">今日訪問請求 (PV)</div>
+                    <div id="statTodayPV" class="text-2xl font-black text-amber-400 mt-1">0</div>
+                </div>
+                <div class="bg-slate-800/60 p-3 rounded-xl border border-slate-700/60">
+                    <div class="text-xs text-slate-400 font-medium">累計獨立終端節點</div>
+                    <div id="statTotalNodes" class="text-2xl font-black text-rose-400 mt-1">0</div>
+                </div>
+            </div>
+
+            <!-- 子標籤切換 -->
+            <div class="flex border-b border-slate-800 px-4 pt-2 gap-4 bg-slate-900">
+                <button id="btnTabVisitors" onclick="switchAnalyticsSubTab('visitors')" class="pb-2 text-sm font-bold border-b-2 border-indigo-500 text-white transition">獨立訪客終端 (<span id="userCountLabel">0</span>)</button>
+                <button id="btnTabLogs" onclick="switchAnalyticsSubTab('logs')" class="pb-2 text-sm font-medium text-slate-400 hover:text-white transition">操作流水日誌 (<span id="logCountLabel">0</span>)</button>
+            </div>
+
+            <!-- 內容滾動區 -->
+            <div class="p-4 flex-1 overflow-y-auto">
+                <!-- 訪客列表 -->
+                <div id="subTabVisitors" class="space-y-2">
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-xs border-collapse">
+                            <thead>
+                                <tr class="border-b border-slate-800 text-slate-400">
+                                    <th class="p-2">在線狀態</th>
+                                    <th class="p-2">真實 IP</th>
+                                    <th class="p-2">設備終端</th>
+                                    <th class="p-2">首次訪問</th>
+                                    <th class="p-2">最近活躍時間</th>
+                                    <th class="p-2">操作次數</th>
+                                    <th class="p-2">最近行為</th>
+                                </tr>
+                            </thead>
+                            <tbody id="visitorTableBody" class="divide-y divide-slate-800/60 font-mono">
+                                <tr><td colspan="7" class="p-4 text-center text-slate-500">暫無訪客記錄</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 流水日誌 -->
+                <div id="subTabLogs" class="space-y-1.5 hidden">
+                    <div id="activityLogsContainer" class="space-y-1 text-xs font-mono max-h-[360px] overflow-y-auto pr-1">
+                        <div class="text-center text-slate-500 p-4">暫無操作日誌</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 底部操作列 -->
+            <div class="p-3 border-t border-slate-800 bg-slate-950/80 flex flex-wrap justify-between items-center text-xs text-slate-400 gap-2">
+                <span>💡 已自動過濾 Render 雲端保活與無效心跳，數據為真實用戶看盤操作。</span>
+                <div class="flex items-center space-x-2">
+                    <span id="analyticsUpdateTime" class="font-mono text-slate-500"></span>
+                    <button onclick="refreshAnalyticsModal()" class="px-3 py-1 bg-slate-800 hover:bg-indigo-600 hover:text-white text-slate-300 rounded font-medium transition">🔄 立即刷新</button>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <footer class="bg-slate-950 border-t border-slate-800 py-4 text-center text-xs text-slate-500">
         hsjc 2.0 Web SaaS · 香港職業賽馬團隊專屬定制 · 完美還原並超越原版 WinForms ResultForm & CompareForm
@@ -1053,9 +1329,111 @@ htmlTemplate = """<!DOCTYPE html>
             renderCardsTable(list);
         }
 
+        async function fetchAnalyticsStats() {
+            try {
+                const res = await fetch('/api/analytics/stats?_t=' + Date.now());
+                if (res.ok) {
+                    const stats = await res.json();
+                    const badgeText = document.getElementById('visitorCountText');
+                    if (badgeText) {
+                        badgeText.textContent = `在線: ${stats.activeUsersCount} 人 | 今日: ${stats.todayUniqueVisitors} 人`;
+                    }
+                    return stats;
+                }
+            } catch (e) {
+                console.warn("[Analytics] 讀取訪客統計失敗:", e);
+            }
+            return null;
+        }
+
+        function openAnalyticsModal() {
+            const modal = document.getElementById('analyticsModal');
+            if (modal) {
+                modal.classList.remove('hidden');
+                refreshAnalyticsModal();
+            }
+        }
+
+        function closeAnalyticsModal() {
+            const modal = document.getElementById('analyticsModal');
+            if (modal) {
+                modal.classList.add('hidden');
+            }
+        }
+
+        function switchAnalyticsSubTab(tabName) {
+            const tabVisitors = document.getElementById('subTabVisitors');
+            const tabLogs = document.getElementById('subTabLogs');
+            const btnVisitors = document.getElementById('btnTabVisitors');
+            const btnLogs = document.getElementById('btnTabLogs');
+
+            if (tabName === 'visitors') {
+                tabVisitors.classList.remove('hidden');
+                tabLogs.classList.add('hidden');
+                btnVisitors.className = "pb-2 text-sm font-bold border-b-2 border-indigo-500 text-white transition";
+                btnLogs.className = "pb-2 text-sm font-medium text-slate-400 hover:text-white transition";
+            } else {
+                tabVisitors.classList.add('hidden');
+                tabLogs.classList.remove('hidden');
+                btnLogs.className = "pb-2 text-sm font-bold border-b-2 border-indigo-500 text-white transition";
+                btnVisitors.className = "pb-2 text-sm font-medium text-slate-400 hover:text-white transition";
+            }
+        }
+
+        async function refreshAnalyticsModal() {
+            const stats = await fetchAnalyticsStats();
+            if (!stats) return;
+
+            document.getElementById('statActiveUsers').textContent = stats.activeUsersCount;
+            document.getElementById('statTodayUV').textContent = stats.todayUniqueVisitors;
+            document.getElementById('statTodayPV').textContent = stats.todayPageViews;
+            document.getElementById('statTotalNodes').textContent = stats.totalTrackedNodes;
+            document.getElementById('userCountLabel').textContent = stats.visitors.length;
+            document.getElementById('logCountLabel').textContent = stats.recentLogs.length;
+            document.getElementById('analyticsUpdateTime').textContent = `更新於 ${stats.serverTime.split(' ')[1]}`;
+
+            const tbody = document.getElementById('visitorTableBody');
+            if (stats.visitors && stats.visitors.length > 0) {
+                tbody.innerHTML = stats.visitors.map(v => {
+                    const statusBadge = v.isActive 
+                        ? `<span class="px-2 py-0.5 bg-emerald-950 text-emerald-400 border border-emerald-700/60 rounded-full text-[10px] font-bold animate-pulse">● 活躍在線</span>`
+                        : `<span class="px-2 py-0.5 bg-slate-800 text-slate-400 border border-slate-700 rounded-full text-[10px]">離線</span>`;
+                    return `<tr class="hover:bg-slate-800/40 transition">
+                        <td class="p-2">${statusBadge}</td>
+                        <td class="p-2 font-bold text-slate-200">${v.ip}</td>
+                        <td class="p-2 text-indigo-300 font-sans">${v.device}</td>
+                        <td class="p-2 text-slate-400">${v.firstSeen.substring(5)}</td>
+                        <td class="p-2 text-amber-300 font-bold">${v.lastSeen.substring(5)}</td>
+                        <td class="p-2 text-slate-300 font-bold">${v.hits}</td>
+                        <td class="p-2 text-emerald-400 font-sans truncate max-w-[200px]" title="${v.lastAction}">${v.lastAction}</td>
+                    </tr>`;
+                }).join('');
+            } else {
+                tbody.innerHTML = `<tr><td colspan="7" class="p-4 text-center text-slate-500">暫無訪客記錄</td></tr>`;
+            }
+
+            const logsContainer = document.getElementById('activityLogsContainer');
+            if (stats.recentLogs && stats.recentLogs.length > 0) {
+                logsContainer.innerHTML = stats.recentLogs.map(l => {
+                    return `<div class="p-2 rounded bg-slate-800/50 hover:bg-slate-800 border border-slate-800 flex items-center justify-between text-xs transition">
+                        <div class="flex items-center space-x-2">
+                            <span class="text-slate-500">${l.timestamp.substring(5)}</span>
+                            <span class="px-1.5 py-0.5 bg-slate-700 text-slate-300 rounded text-[10px]">${l.ip}</span>
+                            <span class="text-indigo-400 text-[11px] font-sans">[${l.device}]</span>
+                            <span class="text-slate-200 font-sans font-medium">${l.action}</span>
+                        </div>
+                        <span class="text-slate-500 text-[10px]">${l.path}</span>
+                    </div>`;
+                }).join('');
+            } else {
+                logsContainer.innerHTML = `<div class="text-center text-slate-500 p-4">暫無操作日誌</div>`;
+            }
+        }
+
         let lastSeenTimestamp = null;
         async function checkAndAutoRefresh() {
             try {
+                fetchAnalyticsStats();
                 const res = await fetch('/api/timestamps?_t=' + Date.now());
                 const tsList = await res.json();
                 if (tsList && tsList.length > 0) {
@@ -1086,6 +1464,7 @@ htmlTemplate = """<!DOCTYPE html>
 
         window.onload = async () => {
             await initPage();
+            await fetchAnalyticsStats();
             if (allTimestamps.length > 0) {
                 lastSeenTimestamp = allTimestamps[0];
             }
@@ -1097,6 +1476,13 @@ htmlTemplate = """<!DOCTYPE html>
 """
 
 class CustomHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, format, *args):
+        if args and len(args) > 0 and "/health" in str(args[0]):
+            return
+        forwardedFor = self.headers.get("X-Forwarded-For")
+        clientIp = forwardedFor.split(",")[0].strip() if forwardedFor else self.headers.get("X-Real-IP", self.client_address[0])
+        sys.stdout.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{clientIp}] {format % args}\n")
+
     def sendJsonResponse(self, data):
         encoded = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(200)
@@ -1124,11 +1510,18 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
             parsedUrl = urllib.parse.urlparse(self.path)
             path = parsedUrl.path
             queryParams = urllib.parse.parse_qs(parsedUrl.query)
+
+            forwardedFor = self.headers.get("X-Forwarded-For")
+            clientIp = forwardedFor.split(",")[0].strip() if forwardedFor else self.headers.get("X-Real-IP", self.client_address[0])
+            userAgent = self.headers.get("User-Agent", "")
+            visitorTracker.recordVisit(clientIp, userAgent, path, queryParams)
             
             if path == "/" or path == "/index.html":
                 self.sendHtmlResponse(htmlTemplate)
             elif path == "/health":
                 self.sendHtmlResponse("OK")
+            elif path == "/api/analytics/stats":
+                self.sendJsonResponse(visitorTracker.getStats())
             elif path == "/api/timestamps":
                 data = queryDistinctTimestamps()
                 self.sendJsonResponse(data)
