@@ -116,7 +116,7 @@ def calculateDynamicInterval():
     isTargetToday = (todayStr == targetDate)
 
     # 0. 若当天赛事已全数完赛封盘，或深宵时段（23:10 - 08:30），进入深度休眠（1小时），彻底杜绝半夜无意义空转与垃圾数据写入
-    if scraperConfig.get("meetingClosed") or (isTargetToday and ((targetVenue == "HV" and (hour >= 23 and minute >= 10)) or (targetVenue == "ST" and (hour >= 18 and minute >= 30)))) or (hour >= 23 or hour < 8):
+    if scraperConfig.get("meetingClosed") or (isTargetToday and ((targetVenue == "HV" and (hour, minute) >= (23, 10)) or (targetVenue == "ST" and (hour, minute) >= (18, 30)))) or (hour >= 23 or hour < 8):
         return 3600
 
     # 1. 跑马地夜赛（比赛日当天晚 18:00 - 23:05）
@@ -453,33 +453,14 @@ def autoScraperLoop():
         wakeUpEvent.wait(timeout=nextInterval)
         wakeUpEvent.clear()
 
-def keepAliveLoop():
-    """Render 容器 7×24 小时防休眠保活守护循环"""
-    print("[KeepAlive Daemon] Anti-sleep ping thread started.")
-    time.sleep(30) # 启动等待 30 秒
-
-    while True:
-        try:
-            port = int(os.environ.get("PORT", 5000))
-            pingUrl = f"http://127.0.0.1:{port}/health"
-            req = urllib.request.Request(pingUrl, headers={"User-Agent": "hsjc-KeepAlive/2.0"})
-            with urllib.request.urlopen(req, timeout=5) as res:
-                pass
-        except Exception:
-            pass
-        time.sleep(600) # 每 10 分钟 ping 一次，保持容器常驻热备
-
 def startBackgroundWorkers():
-    """在 Web 主服务启动时拉起后台双守护线程"""
+    """在 Web 主服务启动时拉起后台数据采集守护线程"""
     initSqliteWalMode()
 
     scraperThread = threading.Thread(target=autoScraperLoop, daemon=True, name="HsjcScraperWorker")
     scraperThread.start()
 
-    keepAliveThread = threading.Thread(target=keepAliveLoop, daemon=True, name="HsjcKeepAliveWorker")
-    keepAliveThread.start()
-
-    print("[Background Workers] Scraper & KeepAlive threads launched successfully.")
+    print("[Background Workers] Scraper daemon thread launched successfully.")
 
 def getScraperStatus():
     """获取当前採集器運行指標"""

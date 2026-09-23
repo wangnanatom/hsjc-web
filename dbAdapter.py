@@ -44,6 +44,62 @@ def getClient():
         # Fallback to local SQLite file
         return libsql_client.create_client_sync(f"file:{defaultDbPath}")
 
+INIT_SCHEMAS = [
+    """CREATE TABLE IF NOT EXISTS win (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        CollectionDateTime TEXT,
+        RaceNo INTEGER,
+        Number INTEGER,
+        WinOdds REAL,
+        Scratched INTEGER DEFAULT 0,
+        OddsDrop REAL DEFAULT 0,
+        Hot INTEGER DEFAULT 0,
+        WillPay TEXT
+    );""",
+    "CREATE INDEX IF NOT EXISTS idx_win_query ON win (CollectionDateTime, RaceNo);",
+    """CREATE TABLE IF NOT EXISTS qin (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        CollectionDateTime TEXT,
+        RaceNo INTEGER,
+        Number TEXT,
+        QinOdds REAL,
+        Scratched INTEGER DEFAULT 0,
+        OddsDrop REAL DEFAULT 0,
+        Hot INTEGER DEFAULT 0,
+        WillPay TEXT
+    );""",
+    "CREATE INDEX IF NOT EXISTS idx_qin_query ON qin (CollectionDateTime, RaceNo);",
+    """CREATE TABLE IF NOT EXISTS qpl (
+        ID INTEGER PRIMARY KEY AUTOINCREMENT,
+        CollectionDateTime TEXT,
+        RaceNo INTEGER,
+        Number TEXT,
+        QplOdds REAL,
+        Scratched INTEGER DEFAULT 0,
+        OddsDrop REAL DEFAULT 0,
+        Hot INTEGER DEFAULT 0,
+        WillPay TEXT
+    );""",
+    "CREATE INDEX IF NOT EXISTS idx_qpl_query ON qpl (CollectionDateTime, RaceNo);"
+]
+
+def initDatabase():
+    """統一自愈初始化：無論連接本地 SQLite 還是全新 Turso 雲庫，啟動時均自動建表與建立索引"""
+    try:
+        client = getClient()
+        try:
+            for sql in INIT_SCHEMAS:
+                try:
+                    client.execute(sql)
+                except Exception:
+                    pass
+        finally:
+            client.close()
+    except Exception as err:
+        print("[dbAdapter] Database schema auto-init error:", err)
+
+initDatabase()
+
 def queryAll(sql, params=None):
     client = getClient()
     try:

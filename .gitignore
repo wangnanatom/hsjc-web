@@ -3,3 +3,6 @@ __pycache__/
 .DS_Store
 .venv/
 .env
+*.db
+*.db-wal
+*.db-shm
