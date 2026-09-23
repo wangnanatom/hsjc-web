@@ -225,21 +225,50 @@ def fetchRaceOddsGql(dateStr, venueCode, raceNo):
     return None
 
 baseOddsCache = {}
+cachedTargetDate = None
+
+def preloadBaseOdds(targetDate):
+    """单次批量预热全天基准早盘赔率，3 次网络查询代替 1,152 次网络查询"""
+    global baseOddsCache, cachedTargetDate
+    baseOddsCache.clear()
+    cachedTargetDate = targetDate
+    try:
+        # 1. 独赢基准
+        winRows = dbAdapter.queryAll(
+            "SELECT RaceNo, Number, WinOdds FROM win WHERE CollectionDateTime LIKE ? ORDER BY CollectionDateTime ASC;",
+            [f"{targetDate}%"]
+        )
+        for r in winRows:
+            key = f"win_{r['RaceNo']}_{r['Number']}"
+            if key not in baseOddsCache and r.get("WinOdds"):
+                baseOddsCache[key] = float(r["WinOdds"])
+
+        # 2. 连赢基准
+        qinRows = dbAdapter.queryAll(
+            "SELECT RaceNo, Number, QinOdds FROM qin WHERE CollectionDateTime LIKE ? ORDER BY CollectionDateTime ASC;",
+            [f"{targetDate}%"]
+        )
+        for r in qinRows:
+            key = f"qin_{r['RaceNo']}_{r['Number']}"
+            if key not in baseOddsCache and r.get("QinOdds"):
+                baseOddsCache[key] = float(r["QinOdds"])
+
+        # 3. 位置Q基准
+        qplRows = dbAdapter.queryAll(
+            "SELECT RaceNo, Number, QplOdds FROM qpl WHERE CollectionDateTime LIKE ? ORDER BY CollectionDateTime ASC;",
+            [f"{targetDate}%"]
+        )
+        for r in qplRows:
+            key = f"qpl_{r['RaceNo']}_{r['Number']}"
+            if key not in baseOddsCache and r.get("QplOdds"):
+                baseOddsCache[key] = float(r["QplOdds"])
+        print(f"[Cache Preload] 成功预热 {len(baseOddsCache)} 条基准早盘赔率。")
+    except Exception as err:
+        print("[Cache Preload Error]:", err)
 
 def getBaseOdds(tableName, raceNo, numberKey, oddsColName):
     cacheKey = f"{tableName}_{raceNo}_{numberKey}"
-    if cacheKey in baseOddsCache:
-        return baseOddsCache[cacheKey]
-    try:
-        sql = f"SELECT {oddsColName} FROM {tableName} WHERE RaceNo = ? AND Number = ? ORDER BY CollectionDateTime ASC LIMIT 1;"
-        row = dbAdapter.queryOne(sql, [raceNo, str(numberKey)])
-        if row and row.get(oddsColName) is not None and float(row[oddsColName]) > 0:
-            val = float(row[oddsColName])
-            baseOddsCache[cacheKey] = val
-            return val
-    except Exception:
-        pass
-    return None
+    return baseOddsCache.get(cacheKey)
 
 def computeOddsDrop(tableName, raceNo, numberKey, currentOdds, oddsColName):
     """自动查询该马匹/组合在当场的初始早盘赔率，计算跌幅（内存高效缓存）"""
@@ -270,6 +299,10 @@ def runScraperCycle():
         scraperConfig["meetingClosed"] = False
         scraperConfig["currentTargetDate"] = targetDate
         baseOddsCache.clear()
+
+    # 赛期基准缓存未命中或为空，一次性极速预热全天基准早盘赔率
+    if cachedTargetDate != targetDate or not baseOddsCache:
+        preloadBaseOdds(targetDate)
 
     # 若当天赛事已被判定为全数完赛，直接跳过写库，保护历史时序
     if scraperConfig.get("meetingClosed"):
@@ -308,7 +341,7 @@ def runScraperCycle():
             for pool in pools:
                 sellStatus = str(pool.get("sellStatus") or "")
                 status = str(pool.get("status") or "")
-                if sellStatus != "STOP_SELL" and status not in ["PAYOUT", "FINAL"]:
+                if status not in ["PAYOUT", "FINAL"]:
                     allPoolsClosed = False
 
                 oddsType = pool.get("oddsType")
@@ -354,8 +387,12 @@ def runScraperCycle():
                         except Exception:
                             pass
 
-        # 完赛检测与终盘去重守护
-        if anyPoolsFound and allPoolsClosed:
+        # 完赛检测与终盘去重守护：必须处于赛后完赛时段（跑马地夜赛晚22:30后，或沙田日赛傍晚18:10后）
+        nowHk = getHkTime()
+        isPostRaceHours = (targetVenue == "HV" and (nowHk.hour >= 23 or (nowHk.hour == 22 and nowHk.minute >= 30))) or \
+                          (targetVenue == "ST" and (nowHk.hour >= 19 or (nowHk.hour == 18 and nowHk.minute >= 10)))
+
+        if anyPoolsFound and allPoolsClosed and isPostRaceHours:
             scraperConfig["meetingClosed"] = True
             closingTimeStr = f"{targetDate} 23:00:00" if targetVenue == "HV" else f"{targetDate} 18:15:00"
             r = dbAdapter.queryOne("SELECT 1 as found FROM win WHERE CollectionDateTime = ? LIMIT 1;", [closingTimeStr])
@@ -397,9 +434,6 @@ def runScraperCycle():
     except Exception as err:
         scraperConfig["lastStatus"] = f"🔴 異常: {str(err)}"
         print(f"[Scraper Error] {err}")
-        conn.rollback()
-    finally:
-        conn.close()
 
 def autoScraperLoop():
     """主抓取守护循环"""
