@@ -29,7 +29,8 @@ scraperConfig = {
     "targetVenueName": None,
     "firstRaceTime": None,
     "meetingClosed": False,
-    "currentTargetDate": None
+    "currentTargetDate": None,
+    "maxRaces": 11          # 默认支持抓取至第 11 场 (涵盖全部沙田常规与大赛日场次)
 }
 
 def initSqliteWalMode():
@@ -279,11 +280,14 @@ def computeOddsDrop(tableName, raceNo, numberKey, currentOdds, oddsColName):
 
 wakeUpEvent = threading.Event()
 
-def runScraperCycle():
+def runScraperCycle(force=False):
     """执行一次完整的抓取与入库计算循环 (纯 HTTP 极速模式，适用于云端容器)"""
     nowStr = getHkTime().strftime("%Y-%m-%d %H:%M:%S")
     scraperConfig["lastRunTime"] = nowStr
     scraperConfig["totalRuns"] += 1
+
+    if force:
+        scraperConfig["meetingClosed"] = False
 
     # 自动嗅探目标赛期与场地
     autoDate, autoVenue, autoVName, autoTime = detectNextMeeting()
@@ -304,13 +308,14 @@ def runScraperCycle():
     if cachedTargetDate != targetDate or not baseOddsCache:
         preloadBaseOdds(targetDate)
 
-    # 若当天赛事已被判定为全数完赛，直接跳过写库，保护历史时序
-    if scraperConfig.get("meetingClosed"):
+    # 若当天赛事已被判定为全数完赛且未强制执行，直接跳过写库，保护历史时序
+    if scraperConfig.get("meetingClosed") and not force:
         scraperConfig["lastStatus"] = f"🏁 完賽封盤: 賽期 [{targetDate} {targetVenue}] 已全數完賽派彩，停止寫庫 ({nowStr})"
         print(f"[{nowStr}] 賽期 [{targetDate} {targetVenue}] 已全數完賽封盤，跳過抓取，保持休眠。")
-        return
+        return {"success": False, "reason": "meetingClosed", "targetDate": targetDate, "targetVenue": targetVenue}
 
-    print(f"[{nowStr}] 云端采集器启动轮询: 赛期 {targetDate} {targetVenue}...")
+    maxRaces = int(scraperConfig.get("maxRaces") or 11)
+    print(f"[{nowStr}] 云端采集器启动轮询: 赛期 {targetDate} {targetVenue} (最大抓取场次: 1~{maxRaces})...")
 
     initSqliteWalMode()
 
@@ -321,8 +326,8 @@ def runScraperCycle():
     allPoolsClosed = True
 
     try:
-        # 抓取 1 至 8 场彩池数据
-        for raceNo in range(1, 9):
+        # 抓取 1 至 maxRaces 场彩池数据 (全面覆盖沙田 11 场、跑马地 9 场及大赛日)
+        for raceNo in range(1, maxRaces + 1):
             res = fetchRaceOddsGql(targetDate, targetVenue, raceNo)
             if not res:
                 allPoolsClosed = False
@@ -431,9 +436,23 @@ def runScraperCycle():
         else:
             scraperConfig["lastStatus"] = f"🟡 待命中: 目標賽期 [{targetDate} {autoVName}] 彩池尚未開盤/非賽馬時段 ({nowStr})"
             print(f"[{nowStr}] 彩池暂未开盘或等待中。")
+
+        return {
+            "success": True,
+            "targetDate": targetDate,
+            "targetVenue": targetVenue,
+            "maxRaces": maxRaces,
+            "winCount": len(winRows),
+            "qinCount": len(qinRows),
+            "qplCount": len(qplRows),
+            "totalSaved": totalSaved,
+            "nowStr": nowStr,
+            "status": scraperConfig.get("lastStatus")
+        }
     except Exception as err:
         scraperConfig["lastStatus"] = f"🔴 異常: {str(err)}"
         print(f"[Scraper Error] {err}")
+        return {"success": False, "error": str(err), "targetDate": targetDate, "targetVenue": targetVenue}
 
 def autoScraperLoop():
     """主抓取守护循环"""
@@ -466,7 +485,7 @@ def getScraperStatus():
     """获取当前採集器運行指標"""
     return scraperConfig
 
-def updateScraperConfig(mode=None, interval=None, enabled=None, targetDate=None, targetVenue=None):
+def updateScraperConfig(mode=None, interval=None, enabled=None, targetDate=None, targetVenue=None, maxRaces=None):
     """動態調整採集配置"""
     if mode in ["smart", "fixed"]:
         scraperConfig["mode"] = mode
@@ -477,8 +496,12 @@ def updateScraperConfig(mode=None, interval=None, enabled=None, targetDate=None,
     if enabled is not None:
         scraperConfig["enabled"] = bool(enabled)
     if targetDate:
-        scraperConfig["targetDate"] = targetDate
+        scraperConfig["targetDate"] = str(targetDate).strip()
+        scraperConfig["meetingClosed"] = False
     if targetVenue:
-        scraperConfig["targetVenue"] = targetVenue
+        scraperConfig["targetVenue"] = str(targetVenue).strip().upper()
+        scraperConfig["meetingClosed"] = False
+    if maxRaces is not None:
+        scraperConfig["maxRaces"] = max(1, min(14, int(maxRaces)))
     wakeUpEvent.set() # 立即唤醒应用新配置
     return scraperConfig

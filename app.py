@@ -381,6 +381,9 @@ htmlTemplate = """<!DOCTYPE html>
             <button onclick="switchTab('matrixTab')" id="btnMatrix" class="tab-btn px-4 py-2 rounded-lg text-sm font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700">2D 組合矩陣 (CompareForm)</button>
             <button onclick="switchTab('resultsTab')" id="btnResults" class="tab-btn px-4 py-2 rounded-lg text-sm font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700">賽事結果復盤</button>
             <button onclick="switchTab('racecardTab')" id="btnRacecard" class="tab-btn px-4 py-2 rounded-lg text-sm font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700">最新排位表 (RaceCard)</button>
+            <button onclick="openScraperModal()" class="px-3.5 py-2 rounded-lg text-sm font-bold bg-gradient-to-r from-amber-600 via-orange-600 to-rose-600 hover:from-amber-500 hover:to-rose-500 text-white shadow-md shadow-rose-950/40 flex items-center transition cursor-pointer">
+                <span class="mr-1.5">⚙️</span>採集控制 & 即時抓取
+            </button>
         </div>
     </header>
 
@@ -442,6 +445,8 @@ htmlTemplate = """<!DOCTYPE html>
                                 <option value="8">第 8 場</option>
                                 <option value="9">第 9 場</option>
                                 <option value="10">第 10 場</option>
+                                <option value="11">第 11 場</option>
+                                <option value="12">第 12 場</option>
                             </select>
                         </div>
                         <div>
@@ -524,8 +529,10 @@ htmlTemplate = """<!DOCTYPE html>
                             <option value="6">第 6 場 (14匹·91組)</option>
                             <option value="7">第 7 場 (9匹·36組)</option>
                             <option value="8">第 8 場 (14匹·91組)</option>
-                            <option value="9">第 9 場 (11匹·55組)</option>
-                            <option value="10">第 10 場 (13匹·78組)</option>
+                            <option value="9">第 9 場</option>
+                            <option value="10">第 10 場</option>
+                            <option value="11">第 11 場</option>
+                            <option value="12">第 12 場</option>
                         </select>
                         <select id="matrixTime" onchange="loadMatrixData()" class="bg-slate-800 border border-slate-700 text-xs text-slate-300 rounded-lg px-3 py-1.5 focus:outline-none focus:border-blue-500">
                             <option value="2026-09-06 18:00:00">2026-09-06 18:00 (臨場終盤 / 狂砸落飛)</option>
@@ -714,6 +721,154 @@ htmlTemplate = """<!DOCTYPE html>
                     <span id="analyticsUpdateTime" class="font-mono text-slate-500"></span>
                     <button onclick="refreshAnalyticsModal()" class="px-3 py-1 bg-slate-800 hover:bg-indigo-600 hover:text-white text-slate-300 rounded font-medium transition">🔄 立即刷新</button>
                 </div>
+            </div>
+    <!-- 實盤數據採集控制台模態框 -->
+    <div id="scraperModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] hidden flex items-center justify-center p-4">
+        <div class="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+            <!-- 頂部標題 -->
+            <div class="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-950/80">
+                <div class="flex items-center space-x-3">
+                    <div class="w-9 h-9 rounded-xl bg-amber-600/20 text-amber-400 flex items-center justify-center font-bold text-lg">⚙️</div>
+                    <div>
+                        <h3 class="text-base font-bold text-white flex items-center gap-2">
+                            實盤數據採集控制台 (Scraper Control)
+                            <span id="scraperModalBadge" class="text-xs font-normal text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded-full border border-emerald-800/60">載入中...</span>
+                        </h3>
+                        <p class="text-xs text-slate-400">自主設定賽事日期、場次範圍 (1~11場)、輪詢頻率並支援一鍵手動強制抓取</p>
+                    </div>
+                </div>
+                <button onclick="closeScraperModal()" class="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-slate-800 transition text-lg cursor-pointer">✕</button>
+            </div>
+
+            <!-- 主體內容 -->
+            <div class="p-5 space-y-5 overflow-y-auto max-h-[calc(90vh-140px)]">
+                <!-- 第一區塊：一鍵手動立即抓取 -->
+                <div class="bg-gradient-to-r from-slate-800/90 to-slate-850 p-4 rounded-xl border border-slate-700/80 shadow-lg">
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div>
+                            <h4 class="text-sm font-bold text-white flex items-center">
+                                <span class="text-amber-400 mr-1.5">⚡</span> 手動即時抓取 (Manual Trigger)
+                            </h4>
+                            <p class="text-xs text-slate-400 mt-0.5">無需等待後台計時器，立即向馬會 GraphQL 接口拉取全場次最新實盤賠率</p>
+                        </div>
+                        <button id="btnTriggerScraper" onclick="triggerManualScrape()" class="px-5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-sm rounded-xl shadow-lg shadow-emerald-950/50 flex items-center justify-center transition cursor-pointer shrink-0">
+                            <span id="btnTriggerIcon" class="mr-2">🚀</span>
+                            <span id="btnTriggerText">立即抓取一次</span>
+                        </button>
+                    </div>
+
+                    <!-- 抓取結果反饋橫幅 -->
+                    <div id="scrapeResultAlert" class="mt-3 p-3 rounded-lg text-xs font-mono hidden"></div>
+                </div>
+
+                <!-- 第二區塊：自主設定時間、場次與參數 -->
+                <div class="bg-slate-800/50 p-4 rounded-xl border border-slate-700/60 space-y-4">
+                    <h4 class="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center">
+                        <span class="w-2 h-2 bg-blue-400 rounded-full mr-2"></span>
+                        採集參數與時間設定
+                    </h4>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <!-- 賽事日期 -->
+                        <div>
+                            <label class="text-xs font-semibold text-slate-400 block mb-1">目標賽事日期 (Target Date)</label>
+                            <div class="flex items-center space-x-2">
+                                <input type="text" id="cfgTargetDate" placeholder="YYYY-MM-DD (例如 2026-10-02)" class="w-full bg-slate-900 border border-slate-700 text-sm font-mono text-emerald-400 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500">
+                                <button type="button" onclick="setScraperDateToday()" class="px-2.5 py-2 bg-slate-700 hover:bg-slate-600 text-xs font-semibold text-slate-200 rounded-lg whitespace-nowrap transition cursor-pointer">今日</button>
+                            </div>
+                            <span class="text-[11px] text-slate-500 mt-1 block">留空將自動按週推算 (週三HV夜賽 / 週日ST日賽)</span>
+                        </div>
+
+                        <!-- 賽事場地 -->
+                        <div>
+                            <label class="text-xs font-semibold text-slate-400 block mb-1">賽事場地 (Venue)</label>
+                            <select id="cfgTargetVenue" class="w-full bg-slate-900 border border-slate-700 text-sm font-bold text-white rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500">
+                                <option value="ST">沙田 (ST - Shatin)</option>
+                                <option value="HV">跑馬地 (HV - Happy Valley)</option>
+                            </select>
+                        </div>
+
+                        <!-- 抓取場次範圍 -->
+                        <div>
+                            <label class="text-xs font-semibold text-slate-400 block mb-1">抓取場次上限 (Max Races)</label>
+                            <select id="cfgMaxRaces" class="w-full bg-slate-900 border border-slate-700 text-sm font-bold text-amber-400 rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500">
+                                <option value="11" selected>第 1 ~ 11 場 (沙田常規/大賽日 推薦)</option>
+                                <option value="10">第 1 ~ 10 場 (沙田常規 10 場)</option>
+                                <option value="9">第 1 ~ 9 場 (跑馬地滿編 9 場)</option>
+                                <option value="8">第 1 ~ 8 場 (跑馬地常規 8 場)</option>
+                                <option value="12">第 1 ~ 12 場 (特別賽事/海外賽事)</option>
+                            </select>
+                            <span class="text-[11px] text-slate-500 mt-1 block">徹底解決 11 场日赛仅抓取 8 场的限制</span>
+                        </div>
+
+                        <!-- 採集頻率模式 -->
+                        <div>
+                            <label class="text-xs font-semibold text-slate-400 block mb-1">採集模式與頻率 (Interval)</label>
+                            <select id="cfgMode" onchange="toggleIntervalInput()" class="w-full bg-slate-900 border border-slate-700 text-sm font-bold text-white rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500 mb-2">
+                                <option value="smart">智能時段自適應 (Smart Mode 推薦)</option>
+                                <option value="fixed">固定秒數輪詢 (Fixed Interval)</option>
+                            </select>
+                            <div id="fixedIntervalBox" class="hidden">
+                                <select id="cfgFixedInterval" class="w-full bg-slate-900 border border-slate-700 text-xs font-mono text-slate-300 rounded-lg px-3 py-1.5 focus:outline-none focus:border-blue-500">
+                                    <option value="15">15 秒 (臨場高頻衝刺)</option>
+                                    <option value="30">30 秒 (高頻實戰)</option>
+                                    <option value="60">60 秒 (1分鐘 中盤常規)</option>
+                                    <option value="120">120 秒 (2分鐘 早盤)</option>
+                                    <option value="300">300 秒 (5分鐘 低頻待命)</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 採集開關與保存操作 -->
+                    <div class="pt-3 border-t border-slate-700/60 flex flex-wrap justify-between items-center gap-3">
+                        <div class="flex items-center space-x-2">
+                            <label class="text-xs font-semibold text-slate-400">後台自動輪詢狀態:</label>
+                            <select id="cfgEnabled" class="bg-slate-900 border border-slate-700 text-xs font-bold rounded-lg px-2.5 py-1 text-white">
+                                <option value="1">🟢 啟用自動輪詢</option>
+                                <option value="0">⏸️ 暫停自動輪詢</option>
+                            </select>
+                        </div>
+                        <button onclick="saveScraperConfig()" class="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs rounded-xl shadow-md shadow-blue-900/40 transition cursor-pointer">
+                            💾 保存設定並立即生效
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 第三區塊：當前採集器指標 -->
+                <div class="bg-slate-950/60 p-4 rounded-xl border border-slate-800 space-y-2">
+                    <div class="text-xs font-bold text-slate-400 flex items-center justify-between">
+                        <span>📊 當前採集器實時運行指標</span>
+                        <button onclick="fetchScraperStatusModal()" class="text-slate-400 hover:text-white text-[11px] underline cursor-pointer">刷新狀態</button>
+                    </div>
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono pt-1">
+                        <div class="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
+                            <span class="text-slate-500 block text-[10px]">最後運行時間</span>
+                            <span id="statLastRunTime" class="text-slate-300 font-bold">--</span>
+                        </div>
+                        <div class="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
+                            <span class="text-slate-500 block text-[10px]">當前輪詢間隔</span>
+                            <span id="statCurrentInterval" class="text-amber-400 font-bold">--</span>
+                        </div>
+                        <div class="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
+                            <span class="text-slate-500 block text-[10px]">累計抓取輪次</span>
+                            <span id="statTotalRuns" class="text-blue-400 font-bold">--</span>
+                        </div>
+                        <div class="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
+                            <span class="text-slate-500 block text-[10px]">累計入庫筆數</span>
+                            <span id="statTotalSaved" class="text-emerald-400 font-bold">--</span>
+                        </div>
+                    </div>
+                    <div class="text-[11px] text-slate-400 pt-1">
+                        <span class="text-slate-500">最新狀態備註: </span>
+                        <span id="statLastStatus" class="font-mono text-slate-300">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 底部關閉按鈕 -->
+            <div class="p-3 border-t border-slate-800 bg-slate-950/80 flex justify-end">
+                <button onclick="closeScraperModal()" class="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium transition cursor-pointer">關閉窗口</button>
             </div>
         </div>
     </div>
@@ -1428,6 +1583,152 @@ htmlTemplate = """<!DOCTYPE html>
             } else {
                 logsContainer.innerHTML = `<div class="text-center text-slate-500 p-4">暫無操作日誌</div>`;
             }
+        // ==================== 採集控制台與手動抓取邏輯 ====================
+        function toggleIntervalInput() {
+            const mode = document.getElementById('cfgMode').value;
+            const box = document.getElementById('fixedIntervalBox');
+            if (mode === 'fixed') {
+                box.classList.remove('hidden');
+            } else {
+                box.classList.add('hidden');
+            }
+        }
+
+        function setScraperDateToday() {
+            const today = new Date();
+            const yyyy = today.getFullYear();
+            const mm = String(today.getMonth() + 1).padStart(2, '0');
+            const dd = String(today.getDate()).padStart(2, '0');
+            document.getElementById('cfgTargetDate').value = `${yyyy}-${mm}-${dd}`;
+        }
+
+        async function openScraperModal() {
+            document.getElementById('scraperModal').classList.remove('hidden');
+            await fetchScraperStatusModal();
+        }
+
+        function closeScraperModal() {
+            document.getElementById('scraperModal').classList.add('hidden');
+        }
+
+        async function fetchScraperStatusModal() {
+            try {
+                const res = await fetch('/api/scraper/status?_t=' + Date.now());
+                const data = await res.json();
+                
+                document.getElementById('statLastRunTime').innerText = data.lastRunTime || '尚未運行';
+                document.getElementById('statCurrentInterval').innerText = `${data.currentInterval || 60} 秒`;
+                document.getElementById('statTotalRuns').innerText = `${data.totalRuns || 0} 次`;
+                document.getElementById('statTotalSaved').innerText = `${(data.totalRecordsSaved || 0).toLocaleString()} 筆`;
+                document.getElementById('statLastStatus').innerText = data.lastStatus || '待命';
+                
+                const badge = document.getElementById('scraperModalBadge');
+                if (data.enabled) {
+                    badge.innerText = `🟢 自動運行中 (${data.mode === 'smart' ? '智能' : data.currentInterval + 's'})`;
+                    badge.className = "text-xs font-normal text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded-full border border-emerald-800/60";
+                } else {
+                    badge.innerText = `⏸️ 已暫停`;
+                    badge.className = "text-xs font-normal text-amber-400 bg-amber-950/80 px-2 py-0.5 rounded-full border border-amber-800/60";
+                }
+
+                if (data.targetDate) {
+                    document.getElementById('cfgTargetDate').value = data.targetDate;
+                }
+                if (data.targetVenue) {
+                    document.getElementById('cfgTargetVenue').value = data.targetVenue;
+                }
+                if (data.maxRaces) {
+                    document.getElementById('cfgMaxRaces').value = String(data.maxRaces);
+                }
+                if (data.mode) {
+                    document.getElementById('cfgMode').value = data.mode;
+                    toggleIntervalInput();
+                }
+                if (data.fixedInterval) {
+                    document.getElementById('cfgFixedInterval').value = String(data.fixedInterval);
+                }
+                document.getElementById('cfgEnabled').value = data.enabled ? "1" : "0";
+            } catch (err) {
+                console.error("獲取採集器狀態失敗:", err);
+            }
+        }
+
+        async function triggerManualScrape() {
+            const btn = document.getElementById('btnTriggerScraper');
+            const icon = document.getElementById('btnTriggerIcon');
+            const text = document.getElementById('btnTriggerText');
+            const alertBox = document.getElementById('scrapeResultAlert');
+
+            btn.disabled = true;
+            btn.classList.add('opacity-70', 'cursor-not-allowed');
+            icon.innerText = "⏳";
+            text.innerText = "正在極速抓取 1~11 場實盤數據...";
+            alertBox.classList.add('hidden');
+
+            try {
+                const res = await fetch('/api/scraper/trigger?force=1&_t=' + Date.now());
+                const resData = await res.json();
+                const r = resData.result || {};
+
+                alertBox.classList.remove('hidden');
+                if (r.success) {
+                    alertBox.className = "mt-3 p-3 rounded-lg text-xs font-mono bg-emerald-950/80 border border-emerald-700/80 text-emerald-300";
+                    alertBox.innerHTML = `
+                        <div class="font-bold text-sm mb-1">🎉 實盤數據抓取成功！</div>
+                        <div>• 目標賽期: <span class="text-white font-bold">${r.targetDate} (${r.targetVenue === 'HV' ? '跑馬地' : '沙田'})</span></div>
+                        <div>• 抓取場次: <span class="text-amber-300 font-bold">第 1 至 ${r.maxRaces} 場 (已覆蓋全日賽程)</span></div>
+                        <div>• 本次入庫: 獨贏 <b>${r.winCount}</b> 條 · 連贏 <b>${r.qinCount}</b> 條 · 位置Q <b>${r.qplCount}</b> 條 (共計 ${r.totalSaved} 條)</div>
+                        <div class="text-slate-400 mt-1 text-[11px]">${r.status || ''}</div>
+                    `;
+                } else {
+                    alertBox.className = "mt-3 p-3 rounded-lg text-xs font-mono bg-amber-950/80 border border-amber-700/80 text-amber-300";
+                    alertBox.innerHTML = `
+                        <div class="font-bold text-sm mb-1">⚠️ 抓取已執行完畢</div>
+                        <div>• 原因/狀態: <span class="text-white">${r.reason || r.error || '彩池暫未開盤或非受注時間'}</span></div>
+                        <div class="text-slate-400 mt-1 text-[11px]">賽期: ${r.targetDate || ''} ${r.targetVenue || ''}</div>
+                    `;
+                }
+
+                await fetchScraperStatusModal();
+                // 刷新主看板
+                await checkAndAutoRefresh();
+                await initPage();
+            } catch (err) {
+                alertBox.classList.remove('hidden');
+                alertBox.className = "mt-3 p-3 rounded-lg text-xs font-mono bg-rose-950/80 border border-rose-700/80 text-rose-300";
+                alertBox.innerHTML = `❌ 請求失敗: ${err.message}`;
+            } finally {
+                btn.disabled = false;
+                btn.classList.remove('opacity-70', 'cursor-not-allowed');
+                icon.innerText = "🚀";
+                text.innerText = "再次抓取";
+            }
+        }
+
+        async function saveScraperConfig() {
+            const targetDate = document.getElementById('cfgTargetDate').value.trim();
+            const targetVenue = document.getElementById('cfgTargetVenue').value;
+            const maxRaces = document.getElementById('cfgMaxRaces').value;
+            const mode = document.getElementById('cfgMode').value;
+            const interval = mode === 'fixed' ? document.getElementById('cfgFixedInterval').value : '60';
+            const enabled = document.getElementById('cfgEnabled').value;
+
+            let url = `/api/scraper/config?mode=${mode}&interval=${interval}&enabled=${enabled}&maxRaces=${maxRaces}`;
+            if (targetDate) {
+                url += `&targetDate=${encodeURIComponent(targetDate)}`;
+            }
+            if (targetVenue) {
+                url += `&targetVenue=${encodeURIComponent(targetVenue)}`;
+            }
+
+            try {
+                const res = await fetch(url);
+                const updated = await res.json();
+                await fetchScraperStatusModal();
+                alert(`✅ 採集設定已成功保存並立即生效！\n\n• 目標賽期: ${updated.targetDate || '自動嗅探'}\n• 賽事場地: ${updated.targetVenue || '自動'}\n• 抓取場次上限: 1 ~ ${updated.maxRaces} 場\n• 工作模式: ${updated.mode}\n• 輪詢間隔: ${updated.currentInterval} 秒`);
+            } catch (err) {
+                alert(`❌ 保存設定失敗: ${err.message}`);
+            }
         }
 
         let lastSeenTimestamp = null;
@@ -1552,13 +1853,16 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
                 enabled = queryParams.get("enabled", [None])[0]
                 targetDate = queryParams.get("targetDate", [None])[0]
                 targetVenue = queryParams.get("targetVenue", [None])[0]
+                maxRaces = queryParams.get("maxRaces", [None])[0]
                 if enabled is not None:
                     enabled = enabled.lower() in ["1", "true", "yes"]
-                updated = updateScraperConfig(mode, interval, enabled, targetDate, targetVenue)
+                updated = updateScraperConfig(mode, interval, enabled, targetDate, targetVenue, maxRaces)
                 self.sendJsonResponse(updated)
             elif path == "/api/scraper/trigger":
-                runScraperCycle()
-                self.sendJsonResponse(getScraperStatus())
+                force = queryParams.get("force", ["0"])[0] in ["1", "true", "yes"]
+                res = runScraperCycle(force=force)
+                status = getScraperStatus()
+                self.sendJsonResponse({"status": status, "result": res})
             elif path == "/api/db/status":
                 self.sendJsonResponse(dbAdapter.getDatabaseStatus())
             else:
