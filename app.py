@@ -2,6 +2,7 @@ import http.server
 import socketserver
 import json
 import sqlite3
+import time
 import os
 import sys
 import threading
@@ -20,6 +21,8 @@ baseDir = os.path.dirname(os.path.abspath(__file__))
 dbPath = os.path.join(baseDir, "hsjc.db")
 visitorLogPath = os.path.join(baseDir, "data", "visitor_analytics.json")
 portNumber = int(os.environ.get("PORT", 5050))
+adminPin = os.environ.get("ADMIN_PIN", "888888")
+lastManualTriggerTime = 0
 
 class VisitorTracker:
     def __init__(self, dataFilePath=None):
@@ -381,8 +384,8 @@ htmlTemplate = """<!DOCTYPE html>
             <button onclick="switchTab('matrixTab')" id="btnMatrix" class="tab-btn px-4 py-2 rounded-lg text-sm font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700">2D 組合矩陣 (CompareForm)</button>
             <button onclick="switchTab('resultsTab')" id="btnResults" class="tab-btn px-4 py-2 rounded-lg text-sm font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700">賽事結果復盤</button>
             <button onclick="switchTab('racecardTab')" id="btnRacecard" class="tab-btn px-4 py-2 rounded-lg text-sm font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700">最新排位表 (RaceCard)</button>
-            <button onclick="openScraperModal()" class="px-3.5 py-2 rounded-lg text-sm font-bold bg-gradient-to-r from-amber-600 via-orange-600 to-rose-600 hover:from-amber-500 hover:to-rose-500 text-white shadow-md shadow-rose-950/40 flex items-center transition cursor-pointer">
-                <span class="mr-1.5">⚙️</span>採集控制 & 即時抓取
+            <button onclick="openScraperModal()" class="px-3.5 py-2 rounded-lg text-sm font-bold bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 hover:border-slate-600 shadow-md flex items-center transition cursor-pointer" title="實盤採集器調控與緊急手動抓取 (受安全密碼保護)">
+                <span class="mr-1.5">🔒</span>採集控制 (管理員)
             </button>
         </div>
     </header>
@@ -742,6 +745,22 @@ htmlTemplate = """<!DOCTYPE html>
 
             <!-- 主體內容 -->
             <div class="p-5 space-y-5 overflow-y-auto max-h-[calc(90vh-140px)]">
+                <!-- 管理員授權提示條 (未解鎖時顯示) -->
+                <div id="adminAuthArea" class="bg-amber-950/40 border border-amber-600/50 p-4 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div class="flex items-center space-x-3">
+                        <span class="text-2xl">🔒</span>
+                        <div>
+                            <h4 class="text-xs font-bold text-amber-300">管理員安全鎖保護</h4>
+                            <p class="text-[11px] text-slate-400 mt-0.5">本系統運行於多用戶雲端環境，採集器全局統一寫入。輸入管理員密碼以解鎖操控。</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center space-x-2 shrink-0">
+                        <input type="password" id="inputAdminPin" placeholder="請輸入管理密碼" class="bg-slate-900 border border-slate-700 text-xs text-white px-3 py-1.5 rounded-lg focus:outline-none focus:border-amber-500 w-36">
+                        <button onclick="submitAdminPin()" class="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold rounded-lg transition cursor-pointer">解鎖</button>
+                    </div>
+                </div>
+
+                <div id="adminControlContent" class="space-y-5 opacity-40 pointer-events-none transition-all">
                 <!-- 第一區塊：一鍵手動立即抓取 -->
                 <div class="bg-gradient-to-r from-slate-800/90 to-slate-850 p-4 rounded-xl border border-slate-700/80 shadow-lg">
                     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -863,6 +882,7 @@ htmlTemplate = """<!DOCTYPE html>
                         <span class="text-slate-500">最新狀態備註: </span>
                         <span id="statLastStatus" class="font-mono text-slate-300">--</span>
                     </div>
+                </div>
                 </div>
             </div>
 
@@ -1602,8 +1622,89 @@ htmlTemplate = """<!DOCTYPE html>
             document.getElementById('cfgTargetDate').value = `${yyyy}-${mm}-${dd}`;
         }
 
+        function unlockAdminControls(pin) {
+            const authArea = document.getElementById('adminAuthArea');
+            const controlContent = document.getElementById('adminControlContent');
+            if (authArea) {
+                authArea.className = "bg-emerald-950/40 border border-emerald-600/50 p-3 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3";
+                authArea.innerHTML = `
+                    <div class="flex items-center space-x-3">
+                        <span class="text-xl">🔓</span>
+                        <div>
+                            <h4 class="text-xs font-bold text-emerald-300">管理員已解鎖 (Admin Authorized)</h4>
+                            <p class="text-[11px] text-slate-400 mt-0.5">當前處於管理員調控模式，可配置全局採集參數或手動強制抓取</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center space-x-2 shrink-0">
+                        <span class="text-xs font-mono text-emerald-400 font-bold mr-1">已授權</span>
+                        <button onclick="logoutAdmin()" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium rounded-lg border border-slate-700 transition cursor-pointer">退出管理</button>
+                    </div>
+                `;
+            }
+            if (controlContent) {
+                controlContent.classList.remove('opacity-40', 'pointer-events-none');
+            }
+        }
+
+        function lockAdminControls() {
+            sessionStorage.removeItem('hsjc_admin_pin');
+            const authArea = document.getElementById('adminAuthArea');
+            const controlContent = document.getElementById('adminControlContent');
+            if (authArea) {
+                authArea.className = "bg-amber-950/40 border border-amber-600/50 p-4 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3";
+                authArea.innerHTML = `
+                    <div class="flex items-center space-x-3">
+                        <span class="text-2xl">🔒</span>
+                        <div>
+                            <h4 class="text-xs font-bold text-amber-300">管理員安全鎖保護</h4>
+                            <p class="text-[11px] text-slate-400 mt-0.5">本系統為多用戶雲端看板，採集器全局統一寫入。輸入管理員密碼以解鎖操控。</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center space-x-2 shrink-0">
+                        <input type="password" id="inputAdminPin" placeholder="請輸入管理密碼" class="bg-slate-900 border border-slate-700 text-xs text-white px-3 py-1.5 rounded-lg focus:outline-none focus:border-amber-500 w-36" onkeydown="if(event.key==='Enter') submitAdminPin()">
+                        <button onclick="submitAdminPin()" class="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold rounded-lg transition cursor-pointer">解鎖</button>
+                    </div>
+                `;
+            }
+            if (controlContent) {
+                controlContent.classList.add('opacity-40', 'pointer-events-none');
+            }
+        }
+
+        async function submitAdminPin() {
+            const input = document.getElementById('inputAdminPin');
+            if (!input) return;
+            const pin = input.value.trim();
+            if (!pin) {
+                alert("請輸入管理員密碼");
+                return;
+            }
+            try {
+                const res = await fetch('/api/scraper/auth?pin=' + encodeURIComponent(pin));
+                const data = await res.json();
+                if (data.success) {
+                    sessionStorage.setItem('hsjc_admin_pin', pin);
+                    unlockAdminControls(pin);
+                } else {
+                    alert("❌ " + (data.error || "密碼驗證失敗"));
+                }
+            } catch (err) {
+                alert("❌ 連線異常: " + err.message);
+            }
+        }
+
+        function logoutAdmin() {
+            lockAdminControls();
+        }
+
         async function openScraperModal() {
             document.getElementById('scraperModal').classList.remove('hidden');
+            const savedPin = sessionStorage.getItem('hsjc_admin_pin');
+            if (savedPin) {
+                unlockAdminControls(savedPin);
+            } else {
+                lockAdminControls();
+            }
             await fetchScraperStatusModal();
         }
 
@@ -1654,6 +1755,12 @@ htmlTemplate = """<!DOCTYPE html>
         }
 
         async function triggerManualScrape() {
+            const pin = sessionStorage.getItem('hsjc_admin_pin') || '';
+            if (!pin) {
+                alert("⚠️ 請先在上方輸入管理員密碼解鎖後再執行操作。");
+                return;
+            }
+
             const btn = document.getElementById('btnTriggerScraper');
             const icon = document.getElementById('btnTriggerIcon');
             const text = document.getElementById('btnTriggerText');
@@ -1666,10 +1773,22 @@ htmlTemplate = """<!DOCTYPE html>
             alertBox.classList.add('hidden');
 
             try {
-                const res = await fetch('/api/scraper/trigger?force=1&_t=' + Date.now());
+                const res = await fetch(`/api/scraper/trigger?force=1&pin=${encodeURIComponent(pin)}&_t=` + Date.now());
                 const resData = await res.json();
-                const r = resData.result || {};
+                
+                if (resData.code === 403) {
+                    alert("❌ 授權失敗或管理員密碼無效，請重新解鎖。");
+                    lockAdminControls();
+                    return;
+                }
+                if (resData.code === 429) {
+                    alertBox.classList.remove('hidden');
+                    alertBox.className = "mt-3 p-3 rounded-lg text-xs font-mono bg-amber-950/80 border border-amber-700/80 text-amber-300";
+                    alertBox.innerHTML = `⚠️ ${resData.error}`;
+                    return;
+                }
 
+                const r = resData.result || {};
                 alertBox.classList.remove('hidden');
                 if (r.success) {
                     alertBox.className = "mt-3 p-3 rounded-lg text-xs font-mono bg-emerald-950/80 border border-emerald-700/80 text-emerald-300";
@@ -1706,6 +1825,12 @@ htmlTemplate = """<!DOCTYPE html>
         }
 
         async function saveScraperConfig() {
+            const pin = sessionStorage.getItem('hsjc_admin_pin') || '';
+            if (!pin) {
+                alert("⚠️ 請先在上方輸入管理員密碼解鎖後再執行操作。");
+                return;
+            }
+
             const targetDate = document.getElementById('cfgTargetDate').value.trim();
             const targetVenue = document.getElementById('cfgTargetVenue').value;
             const maxRaces = document.getElementById('cfgMaxRaces').value;
@@ -1713,7 +1838,7 @@ htmlTemplate = """<!DOCTYPE html>
             const interval = mode === 'fixed' ? document.getElementById('cfgFixedInterval').value : '60';
             const enabled = document.getElementById('cfgEnabled').value;
 
-            let url = `/api/scraper/config?mode=${mode}&interval=${interval}&enabled=${enabled}&maxRaces=${maxRaces}`;
+            let url = `/api/scraper/config?pin=${encodeURIComponent(pin)}&mode=${mode}&interval=${interval}&enabled=${enabled}&maxRaces=${maxRaces}`;
             if (targetDate) {
                 url += `&targetDate=${encodeURIComponent(targetDate)}`;
             }
@@ -1723,7 +1848,13 @@ htmlTemplate = """<!DOCTYPE html>
 
             try {
                 const res = await fetch(url);
-                const updated = await res.json();
+                const data = await res.json();
+                if (data.code === 403) {
+                    alert("❌ 授權失敗或管理員密碼無效，請重新解鎖。");
+                    lockAdminControls();
+                    return;
+                }
+                const updated = data.config || {};
                 await fetchScraperStatusModal();
                 alert(`✅ 採集設定已成功保存並立即生效！\n\n• 目標賽期: ${updated.targetDate || '自動嗅探'}\n• 賽事場地: ${updated.targetVenue || '自動'}\n• 抓取場次上限: 1 ~ ${updated.maxRaces} 場\n• 工作模式: ${updated.mode}\n• 輪詢間隔: ${updated.currentInterval} 秒`);
             } catch (err) {
@@ -1847,7 +1978,17 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
                 self.sendJsonResponse(data)
             elif path == "/api/scraper/status":
                 self.sendJsonResponse(getScraperStatus())
+            elif path == "/api/scraper/auth":
+                pin = queryParams.get("pin", [""])[0]
+                if pin == adminPin:
+                    self.sendJsonResponse({"success": True, "message": "授權驗證成功"})
+                else:
+                    self.sendJsonResponse({"success": False, "error": "管理員密碼錯誤", "code": 403})
             elif path == "/api/scraper/config":
+                pin = queryParams.get("pin", [""])[0]
+                if pin != adminPin:
+                    self.sendJsonResponse({"success": False, "error": "未授權：請輸入正確的管理員 PIN 碼", "code": 403})
+                    return
                 mode = queryParams.get("mode", [None])[0]
                 interval = queryParams.get("interval", [None])[0]
                 enabled = queryParams.get("enabled", [None])[0]
@@ -1857,12 +1998,26 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
                 if enabled is not None:
                     enabled = enabled.lower() in ["1", "true", "yes"]
                 updated = updateScraperConfig(mode, interval, enabled, targetDate, targetVenue, maxRaces)
-                self.sendJsonResponse(updated)
+                self.sendJsonResponse({"success": True, "config": updated})
             elif path == "/api/scraper/trigger":
+                pin = queryParams.get("pin", [""])[0]
+                if pin != adminPin:
+                    self.sendJsonResponse({"success": False, "error": "未授權：請輸入正確的管理員 PIN 碼", "code": 403})
+                    return
+                global lastManualTriggerTime
+                nowTs = time.time()
+                if nowTs - lastManualTriggerTime < 15:
+                    self.sendJsonResponse({
+                        "success": False,
+                        "error": f"請求過於頻繁：手動抓取冷卻中，請等待 {int(15 - (nowTs - lastManualTriggerTime))} 秒後再試",
+                        "code": 429
+                    })
+                    return
+                lastManualTriggerTime = nowTs
                 force = queryParams.get("force", ["0"])[0] in ["1", "true", "yes"]
                 res = runScraperCycle(force=force)
                 status = getScraperStatus()
-                self.sendJsonResponse({"status": status, "result": res})
+                self.sendJsonResponse({"success": True, "status": status, "result": res})
             elif path == "/api/db/status":
                 self.sendJsonResponse(dbAdapter.getDatabaseStatus())
             else:
